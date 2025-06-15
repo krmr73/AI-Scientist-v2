@@ -1,5 +1,6 @@
 import argparse
 import json
+import os
 import os.path as osp
 import re
 import sys
@@ -68,8 +69,40 @@ Here are the proposals that you have already generated:
 {prev_ideas_string}
 '''
 
+Now, propose an idea that is {focus_statement}.
+{focus_bullets}
+
 Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
 """
+
+
+idea_focus_point_prompt = {
+    "Novelty": {
+        "focus_statement": "**highly novel and original**",
+        "focus_bullets": """- Aim for a bold and imaginative approach, pushing boundaries or taking creative risks.
+- Emphasize how this approach explores an unconventional angle and breaks new ground.
+- The idea should still be implementable within constraints, but feel free to propose methods beyond typical incremental tweaks.""",
+        "thought_instructions": """In <THOUGHT>, first discuss your intuitions and motivations for the idea.
+Detail your high-level plan, necessary design choices, and ideal outcomes of the experiments.
+Justify how the idea is **novel** relative to existing concepts and approaches.""",
+    },
+    "Feasibility": {
+        "focus_statement": "**highly feasible and practical**",
+        "focus_bullets": """- The approach should be straightforward to execute using current methods, minimizing complexities.
+- Aim for a solution that is likely to yield reliable and useful results within the existing constraints.
+- Clearly specify why this plan can be realistically achieved with minimal risk.""",
+        "thought_instructions": """In <THOUGHT>, discuss the practical motivations and realistic plan for the idea.
+Demonstrate how each step is achievable with existing code, time, or resource constraints.""",
+    },
+    "Interestingness": {
+        "focus_statement": "**particularly intriguing or thought-provoking**",
+        "focus_bullets": """- Focus on what makes the idea intellectually compelling or surprising.
+- The approach may be moderate in complexity, but should offer insights that spark further questions or open new perspectives.
+- Emphasize how the results could lead to fascinating discussions or follow-up experiments.""",
+        "thought_instructions": """In <THOUGHT>, discuss why the idea is intriguing and how it can uncover unique insights about the urn model
+or lead to deeper understanding.""",
+    },
+}
 
 
 def generate_initial_idea(
@@ -103,6 +136,8 @@ def generate_initial_idea(
             prompt_text = idea_generation_prompt.format(
                 workshop_description=workshop_description,
                 prev_ideas_string=prev_ideas_string,
+                focus_statement=idea_focus_point_prompt[criteria]["focus_statement"],
+                focus_bullets=idea_focus_point_prompt[criteria]["focus_bullets"],
             )
 
             response_text, msg_history = get_response_from_llm(
@@ -182,13 +217,14 @@ if __name__ == "__main__":
     print(f"Using workshop description from {args.workshop_file} for idea generation.")
     print(f"Workshop description:\n{workshop_description}")
 
-    # Create output filename by replacing .md extension with .json
-    idea_fname = args.workshop_file.replace(".md", ".json")
-    print("Starting idea generation for", idea_fname)
+    idea_rname = args.workshop_file.replace(".md", "")
+    print(idea_rname)
+    os.makedirs(idea_rname, exist_ok=True)
+    print("Starting idea generation for", idea_rname)
 
     for cri in CRITERIAS:
         ideas = generate_initial_idea(
-            idea_fname=idea_fname,
+            idea_fname=f"{idea_rname}/{cri}.json",
             client=client,
             model=client_model,
             workshop_description=workshop_description,
