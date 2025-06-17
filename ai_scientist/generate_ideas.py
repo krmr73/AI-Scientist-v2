@@ -104,6 +104,20 @@ or lead to deeper understanding.""",
     },
 }
 
+idea_mutation_prompt = """{workshop_description}
+
+Here are the proposals that you have already generated:
+
+'''
+{prev_idea_string}
+'''
+
+Now, modify one or more key aspects of the existing idea to create a novel yet feasible variation. Your new idea should retain core elements while introducing meaningful changes in assumptions, parameters, or methodology. Ensure that it remains impactful and investigable using the provided code.
+Avoid trivial modifications or overly complex solutions that are impractical to implement.
+
+Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
+"""
+
 
 def generate_initial_idea(
     idea_fname: str,
@@ -111,6 +125,7 @@ def generate_initial_idea(
     model: str,
     workshop_description: str,
     criteria: str,
+    num_prev_ideas: int,
     max_num_generations: int = 20,
     reload_ideas: bool = True,
 ) -> List[Dict]:
@@ -125,9 +140,9 @@ def generate_initial_idea(
     else:
         print(f"No ideas found in {idea_fname}. Starting from scratch.")
 
-    for gen_idx in range(max_num_generations):
+    for idx in range(max_num_generations):
         print()
-        print(f"Generating proposal {gen_idx + 1}/{max_num_generations}")
+        print(f"Generating proposal {idx + 1}/{max_num_generations}")
         try:
             prev_ideas_string = "\n\n".join(idea_str_archive)
             msg_history = []
@@ -154,6 +169,13 @@ def generate_initial_idea(
             try:
                 arguments_json = json.loads(arguments_text)
                 idea = arguments_json.get("idea")
+
+                idea["ID"] = f"0_{num_prev_ideas + idx}"
+
+                # スコア評価
+                evaluation = evaluate_idea(idea, client, model)
+                idea.update(evaluation)
+
                 if not idea:
                     raise ValueError("Missing 'idea' in arguments.")
 
@@ -177,9 +199,127 @@ def generate_initial_idea(
     return ideas
 
 
+def mutate_ideas(
+    base_dir: str,
+    client: Any,
+    model: str,
+    workshop_description: str,
+    ideas: list,
+    generation: int,
+) -> List[Dict]:
+
+    idea_str_archive = []
+
+    for i, prev_idea in enumerate(ideas):
+        print()
+        print(f"Generating proposal {i}/{len(ideas)}")
+        try:
+            prev_idea_string = json.dumps(prev_idea)
+            msg_history = []
+
+            # Use the initial idea generation prompt
+            prompt_text = idea_mutation_prompt.format(
+                workshop_description=workshop_description,
+                prev_idea_string=prev_idea_string,
+            )
+
+            response_text, msg_history = get_response_from_llm(
+                prompt=prompt_text,
+                client=client,
+                model=model,
+                system_message=system_prompt,
+                msg_history=msg_history,
+            )
+
+            arguments_text = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL).group(1)
+
+            # Parse arguments
+            try:
+                arguments_json = json.loads(arguments_text)
+                idea = arguments_json.get("idea")
+                if not idea:
+                    raise ValueError("Missing 'idea' in arguments.")
+
+                idea["source_ids"] = [prev_idea["ID"]]
+                idea["ID"] = f"{generation}_{i}"
+
+                # スコア評価
+                evaluation = evaluate_idea(idea, client, model)
+                idea.update(evaluation)
+
+                # Append the idea to the archive
+                idea_str_archive.append(json.dumps(idea))
+                print(f"Proposal finalized: {idea}")
+            except json.JSONDecodeError:
+                raise ValueError("Invalid arguments JSON for FinalizeIdea.")
+
+        except Exception:
+            print("Failed to generate proposal:")
+            traceback.print_exc()
+            continue
+
+    # Save ideas
+    mutated_ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
+
+    with open(f"{base_dir}/{generation}.json", "w") as f:
+        json.dump(mutated_ideas, f, indent=4)
+    return mutated_ideas
+
+
+def evaluate_idea(idea: Dict[str, Any], client: Any, model: str) -> Dict[str, int]:
+    """
+    1つのアイデアに対して LLM にスコア付けをさせる。
+    - client: LLMクライアント
+    - model: モデル名（例: gpt-4o）
+    戻り値は 3軸のスコア辞書
+    """
+    # 評価用の system prompt（役割指定）
+    evaluation_system_prompt = (
+        "You are a critical and objective reviewer for academic research proposals. "
+        "Your task is to assign integer scores from 1 (very poor) to 20 (excellent) on the following dimensions:\n"
+        "- Interestingness: Is the idea intellectually stimulating or surprising?\n"
+        "- Novelty: Is it clearly original and different from prior work?\n"
+        "- Feasibility: Can it be realistically implemented and tested in an academic lab?\n\n"
+        "Return only a JSON block, without commentary or extra explanation."
+    )
+
+    # ユーザープロンプト（入力となるアイデア）
+    eval_prompt = f"""
+        Evaluate the following research proposal:
+
+        {json.dumps(idea, indent=2)}
+
+        Return your scores in this format:
+
+        ```json
+        {{
+        "Interestingness": <int>,
+        "Novelty": <int>,
+        "Feasibility": <int>
+        }}
+        """.strip()
+
+    try:
+        response, _ = get_response_from_llm(
+            prompt=eval_prompt, client=client, model=model, system_message=evaluation_system_prompt, msg_history=[]
+        )
+
+        match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
+        score_json = json.loads(match.group(1)) if match else json.loads(response)
+
+        return {
+            "Interestingness": int(score_json.get("Interestingness", 0)),
+            "Novelty": int(score_json.get("Novelty", 0)),
+            "Feasibility": int(score_json.get("Feasibility", 0)),
+        }
+
+    except Exception as e:
+        print("評価失敗:", e)
+        return {"Interestingness": 0, "Novelty": 0, "Feasibility": 0}
+
+
 if __name__ == "__main__":
-    MAX_NUM_GENERATIONS = 5
-    CRITERIAS = ["Interestingness", "Novelty", "Feasibility"]
+    CRITERIAS = ["Feasibility", "Interestingness", "Novelty"]
 
     parser = argparse.ArgumentParser(description="Generate AI scientist proposals - template free")
     parser.add_argument(
@@ -201,12 +341,6 @@ if __name__ == "__main__":
         default="ideas/i_cant_believe_its_not_better.md",
         help="Path to the workshop description file.",
     )
-    parser.add_argument(
-        "--num-reflections",
-        type=int,
-        default=5,
-        help="Number of reflection rounds per proposal.",
-    )
     args = parser.parse_args()
 
     # Create the LLM client
@@ -217,18 +351,18 @@ if __name__ == "__main__":
     print(f"Using workshop description from {args.workshop_file} for idea generation.")
     print(f"Workshop description:\n{workshop_description}")
 
-    idea_rname = args.workshop_file.replace(".md", "")
-    print(idea_rname)
-    os.makedirs(idea_rname, exist_ok=True)
-    print("Starting idea generation for", idea_rname)
+    idea_dir_name = args.workshop_file.replace(".md", "")
+    os.makedirs(idea_dir_name, exist_ok=True)
+    print("Starting idea generation for", idea_dir_name)
 
-    for cri in CRITERIAS:
+    for i, cri in enumerate(CRITERIAS):
         ideas = generate_initial_idea(
-            idea_fname=f"{idea_rname}/{cri}.json",
+            idea_fname=f"{idea_dir_name}/{cri}.json",
             client=client,
             model=client_model,
             workshop_description=workshop_description,
             criteria=cri,
             max_num_generations=args.max_num_generations,
+            num_prev_ideas=args.max_num_generations * i,
         )
     print(f"{args.workshop_file} generated {len(ideas)} ideas.")
