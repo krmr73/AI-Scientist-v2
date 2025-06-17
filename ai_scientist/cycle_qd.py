@@ -130,7 +130,7 @@ if __name__ == "__main__":
     register_to_archives(archives, all_ideas)
 
     # QD進化ループ（20世代）
-    for generation in range(1, 4):
+    for generation in range(1, 31):
         crit = CRITERIAS[generation % 3]  # CycleQD: 評価軸を1つ選択
         archive = archives[crit]
 
@@ -162,5 +162,6 @@ if __name__ == "__main__":
 
             # 5世代ごとにエリートと全アイデアを保存
             if generation % 5 == 0:
-                export_elites(archives[cri], idea_lookup, f"{output_dir}/elites/gen_{generation}_{crit}.json")
+                export_elites(archives[cri], idea_lookup, f"{output_dir}/elites/gen_{generation}_{cri}.json")
+
         save_all_ideas(all_ideas, f"{output_dir}/all_ideas.json")
