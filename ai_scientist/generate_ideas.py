@@ -104,6 +104,18 @@ or lead to deeper understanding.""",
     },
 }
 
+idea_generation_simple_prompt = """{workshop_description}
+
+Here are the proposals that you have already generated:
+
+'''
+{prev_ideas_string}
+'''
+
+Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
+"""
+
+# codeに関わる記述を変更
 idea_mutation_prompt = """{workshop_description}
 
 Here are the proposals that you have already generated:
@@ -199,6 +211,78 @@ def generate_initial_idea(
     return ideas
 
 
+def generate_simple_initial_idea(
+    idea_fname: str,
+    client: Any,
+    model: str,
+    workshop_description: str,
+    max_num_generations: int = 20,
+    reload_ideas: bool = True,
+) -> List[Dict]:
+    idea_str_archive = []
+    # load ideas from file
+    if reload_ideas and osp.exists(idea_fname):
+        with open(idea_fname, "r") as f:
+            idea_str_content = json.load(f)
+            for idea in idea_str_content:
+                idea_str_archive.append(json.dumps(idea))
+            print(f"Loaded {len(idea_str_archive)} ideas from {idea_fname}")
+    else:
+        print(f"No ideas found in {idea_fname}. Starting from scratch.")
+
+    for idx in range(max_num_generations):
+        print()
+        print(f"Generating proposal {idx + 1}/{max_num_generations}")
+        try:
+            prev_ideas_string = "\n\n".join(idea_str_archive)
+            msg_history = []
+
+            # Use the initial idea generation prompt
+            prompt_text = idea_generation_simple_prompt.format(
+                workshop_description=workshop_description,
+                prev_ideas_string=prev_ideas_string,
+            )
+
+            response_text, msg_history = get_response_from_llm(
+                prompt=prompt_text,
+                client=client,
+                model=model,
+                system_message=system_prompt,
+                msg_history=msg_history,
+            )
+
+            arguments_text = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL).group(1)
+
+            # Parse arguments
+            try:
+                arguments_json = json.loads(arguments_text)
+                idea = arguments_json.get("idea")
+
+                idea["ID"] = f"0_{idx}"
+
+                if not idea:
+                    raise ValueError("Missing 'idea' in arguments.")
+
+                # Append the idea to the archive
+                idea_str_archive.append(json.dumps(idea))
+                print(f"Proposal finalized: {idea}")
+            except json.JSONDecodeError:
+                raise ValueError("Invalid arguments JSON for FinalizeIdea.")
+
+        except Exception:
+            print("Failed to generate proposal:")
+            traceback.print_exc()
+            continue
+
+    # Save ideas
+    ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
+
+    with open(idea_fname, "w") as f:
+        json.dump(ideas, f, indent=4)
+    print(f"Stored {len(ideas)} ideas in {idea_fname}")
+    return ideas
+
+
 def mutate_ideas(
     base_dir: str,
     client: Any,
@@ -243,9 +327,9 @@ def mutate_ideas(
                 idea["source_ids"] = [prev_idea["ID"]]
                 idea["ID"] = f"{generation}_{i}"
 
-                # スコア評価
-                evaluation = evaluate_idea(idea, client, model)
-                idea.update(evaluation)
+                # # スコア評価
+                # evaluation = evaluate_idea(idea, client, model)
+                # idea.update(evaluation)
 
                 # Append the idea to the archive
                 idea_str_archive.append(json.dumps(idea))
@@ -264,6 +348,60 @@ def mutate_ideas(
     with open(f"{base_dir}/{generation}.json", "w") as f:
         json.dump(mutated_ideas, f, indent=4)
     return mutated_ideas
+
+
+def pairwise_evaluate(
+    idea_a: dict,
+    idea_b: dict,
+    client: Any,
+    model: str,
+    workshop_description: str,
+):
+    pairwise_evaluation_system_prompt = """
+        You are an expert reviewer for an academic workshop. Your role is to evaluate and compare research ideas submitted to the workshop. You must provide an impartial and expert judgment based on the criteria of novelty, feasibility, and relevance to the workshop theme.
+    """
+
+    pairwise_evaluate_prompt = f"""
+        Workshop Description:
+        {workshop_description}
+
+        Here are two research ideas:
+
+        [Idea A]
+        {idea_a}
+
+        [Idea B]
+        {idea_b}
+
+        Which idea is better overall based on the workshop's theme and the following criteria:
+        1. Novelty
+        2. Feasibility
+        3. Significance
+
+        Please respond with only: "A is better" or "B is better".
+        """.strip()
+
+    try:
+        response, _ = get_response_from_llm(
+            prompt=pairwise_evaluate_prompt,
+            client=client,
+            model=model,
+            system_message=pairwise_evaluation_system_prompt,
+            msg_history=[],
+        )
+        response_text = response.strip().lower()
+
+        if "a is better" in response_text:
+            return idea_a
+        elif "b is better" in response_text:
+            return idea_b
+        else:
+            print("曖昧な応答:", response_text)
+            return None
+
+    except Exception as e:
+        print("評価失敗:", e)
+        return None
 
 
 def evaluate_idea(idea: Dict[str, Any], client: Any, model: str) -> Dict[str, int]:
@@ -355,14 +493,22 @@ if __name__ == "__main__":
     os.makedirs(idea_dir_name, exist_ok=True)
     print("Starting idea generation for", idea_dir_name)
 
-    for i, cri in enumerate(CRITERIAS):
-        ideas = generate_initial_idea(
-            idea_fname=f"{idea_dir_name}/{cri}.json",
-            client=client,
-            model=client_model,
-            workshop_description=workshop_description,
-            criteria=cri,
-            max_num_generations=args.max_num_generations,
-            num_prev_ideas=args.max_num_generations * i,
-        )
+    # for i, cri in enumerate(CRITERIAS):
+    #     ideas = generate_initial_idea(
+    #         idea_fname=f"{idea_dir_name}/{cri}.json",
+    #         client=client,
+    #         model=client_model,
+    #         workshop_description=workshop_description,
+    #         criteria=cri,
+    #         max_num_generations=args.max_num_generations,
+    #         num_prev_ideas=args.max_num_generations * i,
+    #     )
+
+    ideas = generate_simple_initial_idea(
+        idea_fname=f"{idea_dir_name}/initial_ideas.json",
+        client=client,
+        model=client_model,
+        workshop_description=workshop_description,
+        max_num_generations=args.max_num_generations,
+    )
     print(f"{args.workshop_file} generated {len(ideas)} ideas.")

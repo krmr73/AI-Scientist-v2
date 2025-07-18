@@ -1,5 +1,5 @@
 import random
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 
 class SimpleGridArchive:
@@ -31,6 +31,31 @@ class SimpleGridArchive:
         current = self.grid.get(key)
         if current is None or quality > current["quality"]:
             self.grid[key] = {"idea_id": idea_id, "quality": quality, "measures": measures}
+
+    def get_idea_at(self, measures: Tuple[float, float]) -> Tuple[Optional[Dict[str, Any]], Optional[float]]:
+        """
+        指定座標（BC値）にアイデアが存在するか確認し、存在すればその内容とそのqualityスコアを返す。
+        存在しなければ (None, None) を返す。
+
+        Returns:
+            (idea_dict, quality_value) or (None, None)
+        """
+        x, y = self._discretize(*measures)
+        key = (x, y)
+        current = self.grid.get(key, None)
+
+        if current is not None:
+            quality = current.get("quality")
+            return current, quality
+        else:
+            return None, None
+
+    def overwrite_idea_at(self, idea_id: int, quality: float, measures: Tuple[float, float]):
+        """
+        指定座標にアイデアを強制的に上書きする（スコアに関係なく）。
+        """
+        x, y = self._discretize(*measures)
+        self.grid[(x, y)] = {"idea_id": idea_id, "quality": quality, "measures": measures}
 
     def sample_elites(self, n: int):
         """
