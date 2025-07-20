@@ -333,7 +333,7 @@ def mutate_ideas(
 
                 # Append the idea to the archive
                 idea_str_archive.append(json.dumps(idea))
-                print(f"Proposal finalized: {idea}")
+                print(f"Proposal finalized: {generation}_{i}")
             except json.JSONDecodeError:
                 raise ValueError("Invalid arguments JSON for FinalizeIdea.")
 

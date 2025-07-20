@@ -3,6 +3,8 @@ import json
 import os
 from typing import Dict, List, Tuple
 
+from sklearn.metrics.pairwise import cosine_distances
+
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
 
@@ -15,10 +17,10 @@ from sentence_transformers import SentenceTransformer
 
 from ai_scientist.llm import AVAILABLE_LLMS, create_client
 
-NORMALIZED_MIN = 1
-NORMALIZED_MAX = 20
-MAP_RESOLUTION = 20  # QDマップの解像度（20x20）
-MARGIN_RATIO = 0.5
+MAP_RESOLUTION = 10
+NORMALIZED_MIN = 0
+NORMALIZED_MAX = MAP_RESOLUTION - 1  # 9
+MARGIN_RATIO = 0.2
 
 
 def export_elites(archive, idea_lookup, out_path):
@@ -51,7 +53,7 @@ def save_qd_map_image(archive: SimpleGridArchive, out_path: str):
 
     plt.figure(figsize=(8, 6))
     cmap = plt.get_cmap("viridis")
-    im = plt.imshow(grid_data, origin="lower", cmap=cmap, vmin=1, vmax=20)
+    im = plt.imshow(grid_data, origin="lower", cmap=cmap, vmin=1, vmax=max(20, np.nanmax(grid_data)))
     plt.colorbar(im, label="Quality Score")
     plt.title(f"QD Map: {archive.name}")
     plt.tight_layout()
@@ -70,10 +72,14 @@ def compute_measures(
     transformer_model: SentenceTransformer,
     umap_model: umap.UMAP,
     bounds: Tuple[float, float, float, float],
+    initial_positions: Dict[str, np.ndarray],
 ) -> Tuple[float, float]:
-    text = preprocess_idea_text(idea)
-    embedding = np.array(transformer_model.encode([text]))
-    reduced = np.array(umap_model.transform(embedding))[0]  # 1つだけ
+    if idea["ID"] in initial_positions:
+        reduced = initial_positions[idea["ID"]]
+    else:
+        text = preprocess_idea_text(idea)
+        embedding = np.array(transformer_model.encode([text]))
+        reduced = np.array(umap_model.transform(embedding))[0]
 
     min_x, max_x, min_y, max_y = bounds
     bc1 = normalize(reduced[0], min_x, max_x, NORMALIZED_MIN, NORMALIZED_MAX)
@@ -90,17 +96,46 @@ def normalize(value: float, min_val: float, max_val: float, target_min: float, t
     return (value - min_val) * scale + target_min
 
 
+import seaborn as sns
+from scipy.spatial.distance import pdist, squareform
+from sklearn.metrics.pairwise import cosine_similarity
+
+
+def validate_umap_similarity(embeddings: np.ndarray, reduced: np.ndarray):
+    # 1. コサイン類似度行列（高いほど類似）
+    cosine_sim = cosine_similarity(embeddings)
+
+    # 2. UMAP空間でのユークリッド距離行列（小さいほど近い）
+    euclidean_dist = squareform(pdist(reduced, metric="euclidean"))
+
+    # 3. 相関（距離が小さいほど、類似度が高いはず → 逆相関）
+    from scipy.stats import spearmanr
+
+    sim_flat = cosine_sim[np.triu_indices_from(cosine_sim, k=1)]
+    dist_flat = euclidean_dist[np.triu_indices_from(euclidean_dist, k=1)]
+    corr, _ = spearmanr(sim_flat, dist_flat)
+    print(f"UMAP位置とコサイン類似度のスピアマン相関: {corr:.3f}")
+
+    threshold = 0.6  # 高類似度ペアだけをチェック
+
+    for i in range(len(embeddings)):
+        for j in range(i + 1, len(embeddings)):
+            sim = cosine_sim[i, j]
+            if sim > threshold:
+                dist = np.linalg.norm(reduced[i] - reduced[j])
+                print(f"Sim: {sim:.2f}, UMAP Distance: {dist:.2f} between ID {i} and {j}")
+
+
 def fit_umap_on_initial_ideas(
     all_ideas: List[Dict[str, str]], transformer_model: SentenceTransformer
-) -> Tuple[umap.UMAP, Tuple[float, float, float, float]]:
+) -> Tuple[umap.UMAP, Tuple[float, float, float, float], Dict[str, np.ndarray]]:
     texts = [preprocess_idea_text(idea) for idea in all_ideas]
     embeddings = np.array(transformer_model.encode(texts))
 
-    n_samples = len(embeddings)
-    n_neighbors = min(10, n_samples - 1)
-
-    umap_model = umap.UMAP(n_components=2, metric="cosine", random_state=0, n_neighbors=n_neighbors)
+    umap_model = umap.UMAP(n_components=2, metric="cosine", random_state=0, n_neighbors=3, min_dist=0.1)
     reduced = np.array(umap_model.fit_transform(embeddings))
+
+    validate_umap_similarity(embeddings, reduced)
 
     plt.scatter(reduced[:, 0], reduced[:, 1])
     plt.title("UMAP Reduced Space")
@@ -112,16 +147,22 @@ def fit_umap_on_initial_ideas(
     min_x, max_x = np.min(reduced[:, 0]), np.max(reduced[:, 0])
     min_y, max_y = np.min(reduced[:, 1]), np.max(reduced[:, 1])
 
-    # マージンを加えて範囲を広げる
-    range_x = max_x - min_x
-    range_y = max_y - min_y
+    center_x = (min_x + max_x) / 2
+    center_y = (min_y + max_y) / 2
+    half_range_x = (max_x - min_x) * (1 + MARGIN_RATIO) / 2
+    half_range_y = (max_y - min_y) * (1 + MARGIN_RATIO) / 2
+
     bounds = (
-        min_x - MARGIN_RATIO * range_x,
-        max_x + MARGIN_RATIO * range_x,
-        min_y - MARGIN_RATIO * range_y,
-        max_y + MARGIN_RATIO * range_y,
+        center_x - half_range_x,
+        center_x + half_range_x,
+        center_y - half_range_y,
+        center_y + half_range_y,
     )
-    return umap_model, bounds
+
+    # ID 付きで初期埋め込み位置を記録
+    id_to_position = {idea["ID"]: reduced[i] for i, idea in enumerate(all_ideas)}
+
+    return umap_model, bounds, id_to_position
 
 
 if __name__ == "__main__":
@@ -162,21 +203,26 @@ if __name__ == "__main__":
     idea_lookup = {idea["ID"]: idea for idea in all_ideas}
 
     # アーカイブの初期化と登録
-    archive = SimpleGridArchive(name="", resolution=MAP_RESOLUTION)
+    archive = SimpleGridArchive(
+        name="",
+        bc1_range=(NORMALIZED_MIN, NORMALIZED_MAX),
+        bc2_range=(NORMALIZED_MIN, NORMALIZED_MAX),
+        resolution=MAP_RESOLUTION,
+    )
 
     transformer_model = SentenceTransformer("all-MiniLM-L6-v2")
-    umap_model, bounds = fit_umap_on_initial_ideas(all_ideas, transformer_model)
+    umap_model, bounds, initial_positions = fit_umap_on_initial_ideas(all_ideas, transformer_model)
 
     for idea in all_ideas:
-        measures = compute_measures(idea, transformer_model, umap_model, bounds)
+        measures = compute_measures(idea, transformer_model, umap_model, bounds, initial_positions)
         quality = 0
         archive.overwrite_idea_at(idea["ID"], quality, measures)
 
     # QD進化ループ（20世代）
-    for generation in range(1, 11):
+    for generation in range(1, 21):
 
         # エリートをランダムに3件選出し、親とする
-        elites = archive.sample_elites(3)
+        elites = archive.sample_elites(5)
         parents = [idea_lookup[e["idea_id"]] for e in elites]
 
         # 新しいアイデアを生成（+スコア付き）
@@ -195,9 +241,9 @@ if __name__ == "__main__":
             idea_id = idea["ID"]
             idea_lookup[idea_id] = idea
 
-            measures = compute_measures(idea, transformer_model, umap_model, bounds)
+            measures = compute_measures(idea, transformer_model, umap_model, bounds, initial_positions)
             exsiting_idea, exsiting_quality = archive.get_idea_at(measures)
-            if exsiting_idea and exsiting_quality:
+            if exsiting_idea:
                 better_idea = pairwise_evaluate(
                     idea_a=exsiting_idea,
                     idea_b=idea,
@@ -220,4 +266,7 @@ if __name__ == "__main__":
         if generation % 5 == 0:
             export_elites(archive, idea_lookup, f"{output_dir}/elites/gen_{generation}.json")
 
-        save_all_ideas(all_ideas, f"{output_dir}/all_ideas.json")
+    save_all_ideas(all_ideas, f"{output_dir}/all_ideas.json")
+    grid = archive.get_grid()
+    with open(f"{output_dir}/grid.json", "w", encoding="utf-8") as f:
+        json.dump(grid, f, ensure_ascii=False, indent=4)

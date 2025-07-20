@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional, Tuple
 
 
 class SimpleGridArchive:
-    def __init__(self, name: str, bc1_range=(1, 20), bc2_range=(1, 20), resolution=20):
+    def __init__(self, name: str, bc1_range: Tuple[int, int], bc2_range: Tuple[int, int], resolution: int):
         """
         QDアーカイブ（2次元グリッド）
         各セルには最高スコアの解（idea_id, quality, measures）を保持
@@ -42,13 +42,15 @@ class SimpleGridArchive:
         """
         x, y = self._discretize(*measures)
         key = (x, y)
-        current = self.grid.get(key, None)
+        current = self.grid.get(key)
+        print(f"current: {current}")
 
-        if current is not None:
-            quality = current.get("quality")
-            return current, quality
-        else:
+        if current is None:
             return None, None
+
+        quality = current.get("quality")
+        print(f"quality: {quality}")
+        return current, quality
 
     def overwrite_idea_at(self, idea_id: int, quality: float, measures: Tuple[float, float]):
         """
