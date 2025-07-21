@@ -2,8 +2,8 @@ import json
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 import seaborn as sns
-import umap
 from sentence_transformers import SentenceTransformer
 from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
 from sklearn.preprocessing import normalize
@@ -104,12 +104,29 @@ def plot_heatmap(embeddings, title, save_path):
     plt.close()
 
 
+def plot_elites_number(df, output_path):
+
+    # グラフの作成
+    plt.figure(figsize=(10, 6))
+    plt.plot(df["generation"], df["num_elites"], label="Number of Elites")
+    plt.plot(df["generation"], df["total_ideas"], label="Total Ideas")
+    plt.xlabel("Generation")
+    plt.ylabel("Count")
+    plt.title("Elites and Total Ideas over Generations")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+
+
 # --- メイン処理 ---
 
-# 1. データ読み込み
-proposed_ideas = load_json(f"../results/{NAME}/elites/gen_50.json")
+idea_num = 80
 
-existing_ideas = load_json("ideas/polya_urn_model.json")[: len(proposed_ideas)]
+# 1. データ読み込み
+proposed_ideas = load_json(f"../results/{NAME}/elites/gen_50.json")[:idea_num]
+
+existing_ideas = load_json("ideas/polya_urn_model.json")[:idea_num]
 existing_literature_ideas = load_json("ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
 
 # 2. テキストとラベル準備
@@ -195,5 +212,11 @@ similar_ideas = find_similar_ideas(embeddings, labels, threshold=0.8)
 print(f"✅ 類似度が{0.8}以上のアイデアペア:")
 for group_pair, pairs in similar_ideas.items():
     print(f"{group_pair} の類似ペア数: {len(pairs)}")
-    for i, j, sim in pairs:
-        print(f"アイデア {i} と アイデア {j} はコサイン類似度 {sim:.4f} で類似しています。")
+    # for i, j, sim in pairs:
+    #     print(f"アイデア {i} と アイデア {j} はコサイン類似度 {sim:.4f} で類似しています。")
+
+
+df = pd.read_csv("../results/qd/qd_history.csv")
+
+# エリート数の推移をプロット
+plot_elites_number(df, "../results/qd/elites_number_over_generations.png")
