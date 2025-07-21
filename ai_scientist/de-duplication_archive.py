@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from generate_ideas import mutate_ideas, pairwise_evaluate
 from sentence_transformers import SentenceTransformer
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
 from ai_scientist.llm import AVAILABLE_LLMS, create_client
@@ -31,6 +32,24 @@ class DistanceThresholdArchiveWithScore:
             return idx, max_sim
         return None, max_sim
 
+    def _find_all_similar_indices(self, vec):
+        """
+        threshold 以上に似ているエリートのインデックスと類似度を返す
+        Returns
+        -------
+        List[Tuple[int, float]]
+            [(idx, sim), ...] しきい値以上のみ
+        """
+        if not self.vecs:
+            return []
+
+        # 行列化して内積（= コサイン類似度）
+        mat = np.vstack(self.vecs)  # shape (N, dim)
+        sims = (mat @ vec.reshape(-1, 1)).flatten()  # shape (N,)
+
+        # しきい値フィルタ
+        return [(i, s) for i, s in enumerate(sims) if s >= self.threshold]
+
     def add_or_replace(self, vec, idea, evaluate_fn=None):
         """近傍に似たものがあるかを確認し、あれば評価関数で置換判断"""
         idx, sim = self._find_similar_index(vec)
@@ -54,6 +73,44 @@ class DistanceThresholdArchiveWithScore:
                 # 負けたら相手に1勝加算
                 self.win_counts[idx] += 1
                 return False, "discard"
+
+    def add_or_replace_multiple(self, vec, idea, evaluate_fn):
+        similar = self._find_all_similar_indices(vec)
+
+        if not similar:
+            # 類似セルなし → 新規追加
+            self.vecs.append(vec)
+            self.ideas.append(idea)
+            self.win_counts.append(0)
+            return True, "add_new"
+
+        # 類似する既存アイデアすべてと評価
+        all_wins = True
+        losers = []  # 勝った相手の index を保存
+        for idx, _ in similar:
+            existing_idea = self.ideas[idx]
+            better = evaluate_fn(existing_idea, idea)
+            if better == idea:
+                losers.append(idx)  # 勝った相手
+            else:
+                # 一つでも負けたら追加しない
+                self.win_counts[idx] += 1
+                all_wins = False
+                break
+
+        if all_wins:
+            # 類似セル全てに勝利 → 相手を削除して追加
+            for idx in sorted(losers, reverse=True):  # 後ろから削除
+                del self.vecs[idx]
+                del self.ideas[idx]
+                del self.win_counts[idx]
+
+            self.vecs.append(vec)
+            self.ideas.append(idea)
+            self.win_counts.append(0)
+            return True, "override_all"
+        else:
+            return False, "discard"
 
     def sample_elites(self, n, rng=np.random):
         if not self.vecs:
@@ -143,7 +200,7 @@ if __name__ == "__main__":
 
     # 初期登録
     for idea, vec in zip(all_ideas, vecs):
-        archive.add_or_replace(vec, idea, evaluate_fn=lambda a, b: a)
+        archive.add_or_replace_multiple(vec, idea, evaluate_fn=lambda a, b: a)
 
     print(f"Initial elites: {archive.num_elites}")
     history = []
@@ -169,11 +226,6 @@ if __name__ == "__main__":
         for idea, vec in zip(new_ideas, new_vecs):
             all_ideas.append(idea)
             idea_lookup[idea["ID"]] = idea
-
-            for elite_vec in archive.vecs:
-                if cosine_similarity([vec], [elite_vec])[0][0] >= threshold:
-                    skip = True
-                    break
 
             added, reason = archive.add_or_replace(
                 vec,
