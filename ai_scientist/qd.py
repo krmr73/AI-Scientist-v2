@@ -3,16 +3,16 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-from sklearn.metrics.pairwise import cosine_distances
+import pandas as pd
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import normalize
 
 os.environ["OMP_NUM_THREADS"] = "1"
 os.environ["NUMBA_NUM_THREADS"] = "1"
 
-import matplotlib.pyplot as plt
 import numpy as np
-import umap
-from archive import SimpleGridArchive
 from generate_ideas import mutate_ideas, pairwise_evaluate
+from ribs.archives import CVTArchive
 from sentence_transformers import SentenceTransformer
 
 from ai_scientist.llm import AVAILABLE_LLMS, create_client
@@ -27,10 +27,12 @@ def export_elites(archive, idea_lookup, out_path):
     """
     QDアーカイブに残っているエリートのアイデアをJSONとして保存
     """
-    elites = [idea_lookup[idea_id] for idea_id in archive.all_idea_ids()]
-    print(f"Archive[{archive.name}]: {archive.all_idea_ids()}")
+    elites = archive.data(fields=["solution", "objective", "measures"], return_type="dict")
+    elite_idxs = elites["solution"].flatten().tolist()
+    elite_ideas = [idea_idx_lookup[idx] for idx in elite_idxs]
+
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(elites, f, ensure_ascii=False, indent=4)
+        json.dump(elite_ideas, f, ensure_ascii=False, indent=4)
 
 
 def save_all_ideas(all_ideas, path):
@@ -41,128 +43,74 @@ def save_all_ideas(all_ideas, path):
         json.dump(all_ideas, f, ensure_ascii=False, indent=4)
 
 
-def save_qd_map_image(archive: SimpleGridArchive, out_path: str):
-    """
-    QDマップをヒートマップとして画像保存する。
-    各セルの値は quality （最適化対象のスコア）
-    """
-    grid_data = np.full((archive.resolution, archive.resolution), np.nan)
-
-    for (x, y), entry in archive.get_grid().items():
-        grid_data[y, x] = entry["quality"]  # matplotlib の座標は [y, x]
-
-    plt.figure(figsize=(8, 6))
-    cmap = plt.get_cmap("viridis")
-    im = plt.imshow(grid_data, origin="lower", cmap=cmap, vmin=1, vmax=max(20, np.nanmax(grid_data)))
-    plt.colorbar(im, label="Quality Score")
-    plt.title(f"QD Map: {archive.name}")
-    plt.tight_layout()
-    plt.savefig(out_path)
-    plt.close()
-
-
 def preprocess_idea_text(idea):
     return " ".join(
         [idea.get("Title", "").strip(), idea.get("Short Hypothesis", "").strip(), idea.get("Abstract", "").strip()]
     )
 
 
-def compute_measures(
-    idea: Dict[str, str],
+def ideas_to_vecs(
+    ideas: List[Dict[str, str]],
     transformer_model: SentenceTransformer,
-    umap_model: umap.UMAP,
-    bounds: Tuple[float, float, float, float],
-    initial_positions: Dict[str, np.ndarray],
-) -> Tuple[float, float]:
-    if idea["ID"] in initial_positions:
-        reduced = initial_positions[idea["ID"]]
-    else:
-        text = preprocess_idea_text(idea)
-        embedding = np.array(transformer_model.encode([text]))
-        reduced = np.array(umap_model.transform(embedding))[0]
+) -> np.ndarray:
+    texts = [preprocess_idea_text(idea) for idea in ideas]
+    embeddings = transformer_model.encode(texts, convert_to_numpy=True)  # shape: (N, 384)
+    # L2ノルムで正規化（各ベクトルの長さが1になる）
+    embeddings = normalize(embeddings, norm="l2", axis=1)
 
-    min_x, max_x, min_y, max_y = bounds
-    bc1 = normalize(reduced[0], min_x, max_x, NORMALIZED_MIN, NORMALIZED_MAX)
-    bc2 = normalize(reduced[1], min_y, max_y, NORMALIZED_MIN, NORMALIZED_MAX)
-    return bc1, bc2
+    return embeddings
 
 
-def normalize(value: float, min_val: float, max_val: float, target_min: float, target_max: float) -> float:
-    if value < min_val or value > max_val:
-        print(f"[CLIP] value={value:.3f} outside range ({min_val:.3f}, {max_val:.3f})")
+def sample_valid_elites(archive, n, rng=np.random):
+    """
+    埋まっているセル（NaN を含まないエリート）のみから
+    一様ランダムで n 件サンプルして返す。
 
-    value = np.clip(value, min_val, max_val)
-    scale = (target_max - target_min) / (max_val - min_val)
-    return (value - min_val) * scale + target_min
+    Returns
+    -------
+    dict
+        {"solution": (n, D_sol), "objective": (n,), "measures": (n, D_meas)}
+    """
+    # ── 1) アーカイブ中の全エリートを取得（dict 形式でコピーが返る）
+    elites = archive.data(fields=["solution", "objective", "measures"], return_type="dict")
 
+    # ── 2) NaN を含む行を除外（occupied 行だけ残す）
+    valid_mask = ~np.isnan(elites["objective"])
+    valid_idx = np.where(valid_mask)[0]
 
-import seaborn as sns
-from scipy.spatial.distance import pdist, squareform
-from sklearn.metrics.pairwise import cosine_similarity
+    if len(valid_idx) < n:
+        raise ValueError(f"有効エリートが {len(valid_idx)} 件しかありません。")
 
+    # ── 3) 有効インデックスからランダムに n 件選ぶ（重複なし）
+    sampled_idx = rng.choice(valid_idx, size=n, replace=False)
 
-def validate_umap_similarity(embeddings: np.ndarray, reduced: np.ndarray):
-    # 1. コサイン類似度行列（高いほど類似）
-    cosine_sim = cosine_similarity(embeddings)
-
-    # 2. UMAP空間でのユークリッド距離行列（小さいほど近い）
-    euclidean_dist = squareform(pdist(reduced, metric="euclidean"))
-
-    # 3. 相関（距離が小さいほど、類似度が高いはず → 逆相関）
-    from scipy.stats import spearmanr
-
-    sim_flat = cosine_sim[np.triu_indices_from(cosine_sim, k=1)]
-    dist_flat = euclidean_dist[np.triu_indices_from(euclidean_dist, k=1)]
-    corr, _ = spearmanr(sim_flat, dist_flat)
-    print(f"UMAP位置とコサイン類似度のスピアマン相関: {corr:.3f}")
-
-    threshold = 0.6  # 高類似度ペアだけをチェック
-
-    for i in range(len(embeddings)):
-        for j in range(i + 1, len(embeddings)):
-            sim = cosine_sim[i, j]
-            if sim > threshold:
-                dist = np.linalg.norm(reduced[i] - reduced[j])
-                print(f"Sim: {sim:.2f}, UMAP Distance: {dist:.2f} between ID {i} and {j}")
+    # ── 4) 選んだインデックスで各フィールドを抽出して返す
+    sampled = {
+        "solution": elites["solution"][sampled_idx],
+        "objective": elites["objective"][sampled_idx],
+        "measures": elites["measures"][sampled_idx],
+    }
+    return sampled
 
 
-def fit_umap_on_initial_ideas(
-    all_ideas: List[Dict[str, str]], transformer_model: SentenceTransformer
-) -> Tuple[umap.UMAP, Tuple[float, float, float, float], Dict[str, np.ndarray]]:
-    texts = [preprocess_idea_text(idea) for idea in all_ideas]
-    embeddings = np.array(transformer_model.encode(texts))
+def analyze_measure_ranges(measures: np.ndarray):
+    min_vals = measures.min(axis=0)
+    max_vals = measures.max(axis=0)
+    mean_vals = measures.mean(axis=0)
+    std_vals = measures.std(axis=0)
 
-    umap_model = umap.UMAP(n_components=2, metric="cosine", random_state=0, n_neighbors=3, min_dist=0.1)
-    reduced = np.array(umap_model.fit_transform(embeddings))
+    overall_min = min_vals.min()
+    overall_max = max_vals.max()
+    overall_mean = mean_vals.mean()
+    overall_std = std_vals.mean()
 
-    validate_umap_similarity(embeddings, reduced)
+    print("📊 measures 全体統計:")
+    print(f"  min:  {overall_min:.6f}")
+    print(f"  max:  {overall_max:.6f}")
+    print(f"  mean: {overall_mean:.6f}")
+    print(f"  std:  {overall_std:.6f}")
 
-    plt.scatter(reduced[:, 0], reduced[:, 1])
-    plt.title("UMAP Reduced Space")
-    plt.xlabel("x")
-    plt.ylabel("y")
-    plt.grid(True)
-    plt.show()
-
-    min_x, max_x = np.min(reduced[:, 0]), np.max(reduced[:, 0])
-    min_y, max_y = np.min(reduced[:, 1]), np.max(reduced[:, 1])
-
-    center_x = (min_x + max_x) / 2
-    center_y = (min_y + max_y) / 2
-    half_range_x = (max_x - min_x) * (1 + MARGIN_RATIO) / 2
-    half_range_y = (max_y - min_y) * (1 + MARGIN_RATIO) / 2
-
-    bounds = (
-        center_x - half_range_x,
-        center_x + half_range_x,
-        center_y - half_range_y,
-        center_y + half_range_y,
-    )
-
-    # ID 付きで初期埋め込み位置を記録
-    id_to_position = {idea["ID"]: reduced[i] for i, idea in enumerate(all_ideas)}
-
-    return umap_model, bounds, id_to_position
+    return overall_min, overall_max
 
 
 if __name__ == "__main__":
@@ -200,73 +148,163 @@ if __name__ == "__main__":
     path = os.path.join(base_dir, "initial_ideas.json")
     with open(path, "r", encoding="utf-8") as f:
         all_ideas = json.load(f)
+
+    # all_ideasの前半の3件を使用
+    # all_ideas = all_ideas[:3]
     idea_lookup = {idea["ID"]: idea for idea in all_ideas}
 
-    # アーカイブの初期化と登録
-    archive = SimpleGridArchive(
-        name="",
-        bc1_range=(NORMALIZED_MIN, NORMALIZED_MAX),
-        bc2_range=(NORMALIZED_MIN, NORMALIZED_MAX),
-        resolution=MAP_RESOLUTION,
-    )
-
     transformer_model = SentenceTransformer("all-MiniLM-L6-v2")
-    umap_model, bounds, initial_positions = fit_umap_on_initial_ideas(all_ideas, transformer_model)
 
-    for idea in all_ideas:
-        measures = compute_measures(idea, transformer_model, umap_model, bounds, initial_positions)
-        quality = 0
-        archive.overwrite_idea_at(idea["ID"], quality, measures)
+    solution_values = []
+    objectives = np.zeros(len(all_ideas), dtype=np.float32)
+    # measures = np.array(ideas_to_vecs(all_ideas, transformer_model))
+
+    vecs = ideas_to_vecs(all_ideas, transformer_model)
+    print("min:", vecs.min(), "max:", vecs.max(), "mean:", vecs.mean(), "std:", vecs.std())
+
+    pca = PCA(n_components=20)
+    pca.fit(vecs)
+
+    measures = np.array(pca.transform(vecs))
+
+    mins = measures.min(axis=0)
+    maxs = measures.max(axis=0)
+    range_margin = 0.05
+    ranges = [(float(min_val - range_margin), float(max_val + range_margin)) for min_val, max_val in zip(mins, maxs)]
+
+    # アーカイブの初期化と登録
+    archive = CVTArchive(solution_dim=1, cells=512, ranges=ranges, seed=42, centroid_method="sobol")
+
+    # 0の配列で初期化
+    # shape: (N, 1) ここでNはアイデアの
+
+    idea_idx_lookup = {}
+    for idx, idea in enumerate(all_ideas):
+        idea_idx_lookup[idx] = idea  # dictとして保持
+        solution_values.append(idx)
+    solutions = np.array(solution_values, dtype=np.int32).reshape(-1, 1)
+
+    assert not np.any(np.isnan(solutions))
+    assert not np.any(np.isnan(objectives))
+    assert not np.any(np.isnan(measures))
+    archive.add(
+        solution=solutions,  # shape: (N, 1)
+        objective=objectives,  # shape: (N,)
+        measures=measures,  # shape: (N, 384)
+    )
+    history = []
+
+    print(f"Initial archive size: {archive.stats.num_elites}")
 
     # QD進化ループ（20世代）
-    for generation in range(1, 21):
+    for generation in range(1, 51):
 
-        # エリートをランダムに3件選出し、親とする
-        elites = archive.sample_elites(5)
-        parents = [idea_lookup[e["idea_id"]] for e in elites]
+        # 1. エリートをランダムにサンプリング
+        # num_elites = archive.stats.num_elites
+        # print(f"エリートの数: {num_elites}")
 
-        # 新しいアイデアを生成（+スコア付き）
+        some_elites = archive.sample_elites(5)
+        # some_elites = sample_valid_elites(archive, 2)
+
+        if some_elites is None:
+            print(f"[Gen {generation}] Not enough elites to sample parents.")
+            break
+        old_idea_idxs = some_elites["solution"].flatten().tolist()
+        old_ideas = [idea_idx_lookup[idx] for idx in old_idea_idxs]
+
+        # 2. 変異による新しいアイデアの生成
         new_ideas = mutate_ideas(
             base_dir=base_dir,
             client=client,
             model=client_model,
             workshop_description=workshop_description,
-            ideas=parents,
+            ideas=old_ideas,
             generation=generation,
         )
 
-        # 全アイデアに追加し、アーカイブに保存
-        for idea in new_ideas:
+        num_existing = len(all_ideas)
+        # 3. 新しいアイデアを登録
+        for i, idea in enumerate(new_ideas):
             all_ideas.append(idea)
-            idea_id = idea["ID"]
-            idea_lookup[idea_id] = idea
+            idea_lookup[idea["ID"]] = idea
+            idea_idx_lookup[num_existing + i] = idea
 
-            measures = compute_measures(idea, transformer_model, umap_model, bounds, initial_positions)
-            exsiting_idea, exsiting_quality = archive.get_idea_at(measures)
-            if exsiting_idea:
+        vecs = ideas_to_vecs(new_ideas, transformer_model)
+        pca_vecs = pca.transform(vecs)
+
+        # 該当セルの既存エリートを取得
+        occupieds, elites = archive.retrieve(pca_vecs)
+
+        # 追加するsolutionとobjectiveの初期化
+        new_solution_values = []
+        new_objective_values = []
+        new_measure_values = []
+
+        for i, occupied in enumerate(occupieds):
+
+            new_idea = new_ideas[i]
+
+            # 4. アーカイブに登録
+            if occupied:
+                # 既存のアイデアがある場合は上書き
+
+                existing_quality = elites["objective"][i]
+                existing_embed = elites["measures"][i]
+                existing_idea_idx = elites["solution"][i][0]  # 1次元のソリューションから取得
+                existing_idea = idea_idx_lookup[existing_idea_idx]
+
                 better_idea = pairwise_evaluate(
-                    idea_a=exsiting_idea,
-                    idea_b=idea,
+                    idea_a=existing_idea,
+                    idea_b=new_idea,
                     client=client,
                     model=client_model,
                     workshop_description=workshop_description,
                 )
-                quality = exsiting_quality + 1
+                new_objective_values.append(existing_quality + 1.0)  # 既存のスコアに1.0を加算
                 print(f"override: {better_idea['ID']}")
             else:
-                better_idea = idea
-                quality = 0
-                print(f"add new idea: {idea_id}")
-            archive.overwrite_idea_at(better_idea["ID"], quality, measures)
+                better_idea = new_idea
+                new_objective_values.append(0.0)  # 新規アイデアは初期スコア0
+                print(f"add new idea: {better_idea['ID']}")
 
-        # 可視化保存
-        save_qd_map_image(archive, f"{output_dir}/images/gen_{generation}.png")
+            if better_idea == new_idea:
+                new_solution_values.append(num_existing + i)
+                new_measure_values.append(pca_vecs[i])
+            else:
+                # 既存のアイデアを上書きした場合はそのidxを使用
+                new_solution_values.append(existing_idea_idx)
+                new_measure_values.append(existing_embed)
+
+        assert not np.any(np.isnan(solutions))
+        assert not np.any(np.isnan(objectives))
+        assert not np.any(np.isnan(measures))
+        archive.add(
+            solution=np.array(new_solution_values, dtype=np.int32).reshape(-1, 1),
+            objective=np.array(new_objective_values, dtype=np.float32),
+            measures=np.array(new_measure_values, dtype=np.float32),
+        )
+        print(f"Generation {generation} complete. Archive size: {archive.stats.num_elites}")
+        print(f"カバレッジ: {archive.stats.coverage:.2%}")
+        print(f"QDスコア: {archive.stats.qd_score:.4f}")
+
+        # 世代の記録を保存
+        record = {
+            "generation": generation,
+            "qd_score": archive.stats.qd_score,
+            "coverage": archive.stats.coverage,
+            "num_elites": archive.stats.num_elites,
+        }
+        history.append(record)
 
         # 5世代ごとにエリートと全アイデアを保存
         if generation % 5 == 0:
             export_elites(archive, idea_lookup, f"{output_dir}/elites/gen_{generation}.json")
 
-    save_all_ideas(all_ideas, f"{output_dir}/all_ideas.json")
-    grid = archive.get_grid()
-    with open(f"{output_dir}/grid.json", "w", encoding="utf-8") as f:
-        json.dump(grid, f, ensure_ascii=False, indent=4)
+    # CSV形式で保存（Pandasでプロットなどが簡単）
+    df = pd.DataFrame(history)
+    df.to_csv(f"{output_dir}/qd_history.csv", index=False)
+
+    # save_all_ideas(all_ideas, f"{output_dir}/all_ideas.json")
+    # # grid = archive.get_grid()
+    # # with open(f"{output_dir}/grid.json", "w", encoding="utf-8") as f:
+    # #     json.dump(grid, f, ensure_ascii=False, indent=4)
