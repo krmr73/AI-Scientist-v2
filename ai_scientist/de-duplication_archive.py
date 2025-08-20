@@ -14,7 +14,7 @@ from ai_scientist.llm import AVAILABLE_LLMS, create_client
 
 
 class DistanceThresholdArchiveWithScore:
-    def __init__(self, dim, threshold=0.85):
+    def __init__(self, dim, threshold=0.80):
         self.dim = dim
         self.threshold = threshold
         self.vecs = []  # 正規化済みベクトル (N, dim)
@@ -227,7 +227,7 @@ if __name__ == "__main__":
             all_ideas.append(idea)
             idea_lookup[idea["ID"]] = idea
 
-            added, reason = archive.add_or_replace(
+            added, reason = archive.add_or_replace_multiple(
                 vec,
                 idea,
                 evaluate_fn=lambda a, b: pairwise_evaluate(
