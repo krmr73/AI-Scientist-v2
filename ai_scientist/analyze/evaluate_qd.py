@@ -3,9 +3,8 @@ import json
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import seaborn as sns
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_distances, cosine_similarity
+from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
 # --- 定数 ---
@@ -13,7 +12,7 @@ NAME = "qd"
 GROUP_NAMES = ["Reflection-only", "Literature-informed", "Proposed"]
 COLORS = ["steelblue", "darkorange", "forestgreen"]
 UMAP_OUTPUT_PATH = f"../results/{NAME}/umap_3groups.png"
-DISTRIBUTION_OUTPUT_PATH = f"../results/{NAME}/distribution_3groups_stacked.png"
+DISTRIBUTION_OUTPUT_PATH = f"../results/{NAME}/distribution.png"
 HEATMAP_PATHS = [
     f"../results/{NAME}/heatmap_baseline.png",
     f"../results/{NAME}/heatmap_literature.png",
@@ -48,13 +47,13 @@ def load_unique_ideas(file_paths):
 def compute_mean_std_within_group(group_embs):
     if len(group_embs) < 2:
         return np.nan, np.nan
-    dists = cosine_distances(group_embs)
+    dists = cosine_similarity(group_embs)
     upper = dists[np.triu_indices(len(group_embs), k=1)]
     return np.mean(upper), np.std(upper)
 
 
-def get_pairwise_distances(embeddings):
-    dist_matrix = cosine_distances(embeddings)
+def get_pairwise_similarities(embeddings):
+    dist_matrix = cosine_similarity(embeddings)
     return dist_matrix[np.triu_indices(len(embeddings), k=1)]
 
 
@@ -69,39 +68,21 @@ def plot_umap(reduced, labels):
     plt.savefig(UMAP_OUTPUT_PATH)  # 変数名はそのままでもOK（ファイル名を変えるならここも修正）
 
 
-def plot_distance_histograms(d0, d1, d2):
-    all_dists = np.concatenate([d0, d1, d2])
-    bins = np.histogram_bin_edges(all_dists, bins=15)
-    ymax = max(np.histogram(d, bins=bins)[0].max() for d in [d0, d1, d2])
+def plot_similarity_histograms(s0, s1, s2):
+    all_sims = np.concatenate([s0, s1, s2])
+    bins = np.histogram_bin_edges(all_sims, bins=15)
+    ymax = max(np.histogram(s, bins=bins)[0].max() for s in [s0, s1, s2])
 
     fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    for ax, dist, name, color in zip(axes, [d0, d1, d2], GROUP_NAMES, COLORS):
-        ax.hist(dist, bins=bins, color=color, alpha=0.7, edgecolor="grey")
+    for ax, sim, name, color in zip(axes, [s0, s1, s2], GROUP_NAMES, COLORS):
+        ax.hist(sim, bins=bins, color=color, alpha=0.7, edgecolor="grey")
         ax.set_title(name)
         ax.set_ylabel("Density")
         ax.set_ylim(0, ymax)
-    axes[2].set_xlabel("Cosine Distance Between Ideas")
+    axes[2].set_xlabel("Cosine Similarity Between Ideas")
+
     plt.tight_layout()
     plt.savefig(DISTRIBUTION_OUTPUT_PATH)
-
-
-def plot_heatmap(embeddings, title, save_path):
-    dist_matrix = cosine_distances(embeddings)
-    plt.figure(figsize=(8, 7))
-    sns.heatmap(
-        dist_matrix,
-        cmap="viridis",
-        square=True,
-        cbar_kws={"label": "Cosine Distance"},
-        xticklabels=False,
-        yticklabels=False,
-        vmin=0.0,
-        vmax=1.0,
-    )
-    plt.title(title)
-    plt.tight_layout()
-    plt.savefig(save_path, dpi=300)
-    plt.close()
 
 
 def plot_elites_number(df, output_path):
@@ -119,9 +100,37 @@ def plot_elites_number(df, output_path):
     plt.savefig(output_path, dpi=300)
 
 
+def find_similar_ideas(embeddings, labels, threshold=0.8):
+    """
+    同一グループ内でコサイン類似度 >= threshold のアイデアペアを列挙。
+    返回: {group_name: [(i,j,sim), ...]}
+    """
+    # 1. L2 正規化（任意だが明示的に）
+    emb_norm = normalize(embeddings, norm="l2", axis=1)
+
+    # 2. 類似度行列
+    sim_mat = cosine_similarity(emb_norm)
+
+    # 3. 結果格納
+    similar_pairs = {g: [] for g in GROUP_NAMES}
+
+    # 4. 上三角だけ走査
+    for i, j in zip(*np.triu_indices_from(sim_mat, k=1)):
+        sim = sim_mat[i, j]
+        if sim >= threshold and labels[i] == labels[j]:
+            group = GROUP_NAMES[labels[i]]
+            similar_pairs[group].append((i, j, sim))
+
+            # オプション: アイデアIDを表示
+            print(f"Group: {group}, Ideas: {i} vs {j}, Similarity: {sim:.4f}")
+
+    return similar_pairs
+
+
 # --- メイン処理 ---
 
 idea_num = 80
+plt.rcParams.update({"font.size": 16})
 
 # 1. データ読み込み
 proposed_ideas = load_json(f"../results/{NAME}/elites/gen_50.json")[:idea_num]
@@ -163,60 +172,26 @@ embeddings = np.array(embeddings)
 # print(reduced)
 
 # plot_umap(reduced, labels)
-
-# 5. グループ分割・距離計算
+# 5. グループ分割・類似度計算
 emb_groups = [embeddings[labels == i] for i in range(3)]
 means_stds = [compute_mean_std_within_group(g) for g in emb_groups]
 
-print("✅ Group-wise Mean Pairwise Distances:")
+print("✅ Group-wise Mean Pairwise Similarities:")
 for i, (mean, std) in enumerate(means_stds):
     print(f"  {GROUP_NAMES[i]} (n={len(emb_groups[i])}): Mean = {mean:.4f}, Std = {std:.4f}")
 
-# 6. 距離分布ヒストグラム
-dists = [get_pairwise_distances(g) for g in emb_groups]
-plot_distance_histograms(*dists)
+# 6. 類似度分布ヒストグラムの描画
+sims = [get_pairwise_similarities(g) for g in emb_groups]
+plot_similarity_histograms(*sims)
 
-# 7. ヒートマップ描画
-for i, group in enumerate(emb_groups):
-    plot_heatmap(group, f"Heatmap ({GROUP_NAMES[i]})", HEATMAP_PATHS[i])
-
-
-def find_similar_ideas(embeddings, labels, threshold=0.8):
-    """
-    同一グループ内でコサイン類似度 >= threshold のアイデアペアを列挙。
-    返回: {group_name: [(i,j,sim), ...]}
-    """
-    # 1. L2 正規化（任意だが明示的に）
-    emb_norm = normalize(embeddings, norm="l2", axis=1)
-
-    # 2. 類似度行列
-    sim_mat = cosine_similarity(emb_norm)
-
-    # 3. 結果格納
-    similar_pairs = {g: [] for g in GROUP_NAMES}
-
-    # 4. 上三角だけ走査
-    for i, j in zip(*np.triu_indices_from(sim_mat, k=1)):
-        sim = sim_mat[i, j]
-        if sim >= threshold and labels[i] == labels[j]:
-            group = GROUP_NAMES[labels[i]]
-            similar_pairs[group].append((i, j, sim))
-
-    return similar_pairs
-
-
-# 類似度が高いペアをグループごとに抽出
+# 7. 類似ペアの抽出と表示（類似度 ≥ 0.8）
 similar_ideas = find_similar_ideas(embeddings, labels, threshold=0.8)
 
-# 提案手法と他の手法との比較結果を表示
-print(f"✅ 類似度が{0.8}以上のアイデアペア:")
-for group_pair, pairs in similar_ideas.items():
-    print(f"{group_pair} の類似ペア数: {len(pairs)}")
-    # for i, j, sim in pairs:
-    #     print(f"アイデア {i} と アイデア {j} はコサイン類似度 {sim:.4f} で類似しています。")
+print("✅ 類似度が 0.8 以上のアイデアペア:")
+for group_name, pairs in similar_ideas.items():
+    print(f"{group_name} の類似ペア数: {len(pairs)}")
 
 
 df = pd.read_csv("../results/qd/qd_history.csv")
-
 # エリート数の推移をプロット
 plot_elites_number(df, "../results/qd/elites_number_over_generations.png")
