@@ -61,49 +61,6 @@ Ensure the JSON is properly formatted for automatic parsing.
 Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
 
 # Define the initial idea generation prompt
-idea_generation_prompt = """{workshop_description}
-
-Here are the proposals that you have already generated:
-
-'''
-{prev_ideas_string}
-'''
-
-Now, propose an idea that is {focus_statement}.
-{focus_bullets}
-
-Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
-"""
-
-
-idea_focus_point_prompt = {
-    "Novelty": {
-        "focus_statement": "**highly novel and original**",
-        "focus_bullets": """- Aim for a bold and imaginative approach, pushing boundaries or taking creative risks.
-- Emphasize how this approach explores an unconventional angle and breaks new ground.
-- The idea should still be implementable within constraints, but feel free to propose methods beyond typical incremental tweaks.""",
-        "thought_instructions": """In <THOUGHT>, first discuss your intuitions and motivations for the idea.
-Detail your high-level plan, necessary design choices, and ideal outcomes of the experiments.
-Justify how the idea is **novel** relative to existing concepts and approaches.""",
-    },
-    "Feasibility": {
-        "focus_statement": "**highly feasible and practical**",
-        "focus_bullets": """- The approach should be straightforward to execute using current methods, minimizing complexities.
-- Aim for a solution that is likely to yield reliable and useful results within the existing constraints.
-- Clearly specify why this plan can be realistically achieved with minimal risk.""",
-        "thought_instructions": """In <THOUGHT>, discuss the practical motivations and realistic plan for the idea.
-Demonstrate how each step is achievable with existing code, time, or resource constraints.""",
-    },
-    "Interestingness": {
-        "focus_statement": "**particularly intriguing or thought-provoking**",
-        "focus_bullets": """- Focus on what makes the idea intellectually compelling or surprising.
-- The approach may be moderate in complexity, but should offer insights that spark further questions or open new perspectives.
-- Emphasize how the results could lead to fascinating discussions or follow-up experiments.""",
-        "thought_instructions": """In <THOUGHT>, discuss why the idea is intriguing and how it can uncover unique insights about the urn model
-or lead to deeper understanding.""",
-    },
-}
-
 idea_generation_simple_prompt = """{workshop_description}
 
 Here are the proposals that you have already generated:
@@ -129,86 +86,6 @@ Avoid trivial modifications or overly complex solutions that are impractical to 
 
 Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
 """
-
-
-def generate_initial_idea(
-    idea_fname: str,
-    client: Any,
-    model: str,
-    workshop_description: str,
-    criteria: str,
-    num_prev_ideas: int,
-    max_num_generations: int = 20,
-    reload_ideas: bool = True,
-) -> List[Dict]:
-    idea_str_archive = []
-    # load ideas from file
-    if reload_ideas and osp.exists(idea_fname):
-        with open(idea_fname, "r") as f:
-            idea_str_content = json.load(f)
-            for idea in idea_str_content:
-                idea_str_archive.append(json.dumps(idea))
-            print(f"Loaded {len(idea_str_archive)} ideas from {idea_fname}")
-    else:
-        print(f"No ideas found in {idea_fname}. Starting from scratch.")
-
-    for idx in range(max_num_generations):
-        print()
-        print(f"Generating proposal {idx + 1}/{max_num_generations}")
-        try:
-            prev_ideas_string = "\n\n".join(idea_str_archive)
-            msg_history = []
-
-            # Use the initial idea generation prompt
-            prompt_text = idea_generation_prompt.format(
-                workshop_description=workshop_description,
-                prev_ideas_string=prev_ideas_string,
-                focus_statement=idea_focus_point_prompt[criteria]["focus_statement"],
-                focus_bullets=idea_focus_point_prompt[criteria]["focus_bullets"],
-            )
-
-            response_text, msg_history = get_response_from_llm(
-                prompt=prompt_text,
-                client=client,
-                model=model,
-                system_message=system_prompt,
-                msg_history=msg_history,
-            )
-
-            arguments_text = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL).group(1)
-
-            # Parse arguments
-            try:
-                arguments_json = json.loads(arguments_text)
-                idea = arguments_json.get("idea")
-
-                idea["ID"] = f"0_{num_prev_ideas + idx}"
-
-                # スコア評価
-                evaluation = evaluate_idea(idea, client, model)
-                idea.update(evaluation)
-
-                if not idea:
-                    raise ValueError("Missing 'idea' in arguments.")
-
-                # Append the idea to the archive
-                idea_str_archive.append(json.dumps(idea))
-                print(f"Proposal finalized: {idea}")
-            except json.JSONDecodeError:
-                raise ValueError("Invalid arguments JSON for FinalizeIdea.")
-
-        except Exception:
-            print("Failed to generate proposal:")
-            traceback.print_exc()
-            continue
-
-    # Save ideas
-    ideas = [json.loads(idea_str) for idea_str in idea_str_archive]
-
-    with open(idea_fname, "w") as f:
-        json.dump(ideas, f, indent=4)
-    print(f"Stored {len(ideas)} ideas in {idea_fname}")
-    return ideas
 
 
 def generate_simple_initial_idea(
@@ -492,17 +369,6 @@ if __name__ == "__main__":
     idea_dir_name = args.workshop_file.replace(".md", "")
     os.makedirs(idea_dir_name, exist_ok=True)
     print("Starting idea generation for", idea_dir_name)
-
-    # for i, cri in enumerate(CRITERIAS):
-    #     ideas = generate_initial_idea(
-    #         idea_fname=f"{idea_dir_name}/{cri}.json",
-    #         client=client,
-    #         model=client_model,
-    #         workshop_description=workshop_description,
-    #         criteria=cri,
-    #         max_num_generations=args.max_num_generations,
-    #         num_prev_ideas=args.max_num_generations * i,
-    #     )
 
     ideas = generate_simple_initial_idea(
         idea_fname=f"{idea_dir_name}/initial_ideas.json",
