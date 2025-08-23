@@ -212,6 +212,7 @@ if __name__ == "__main__":
         parent_ideas = some_elites["ideas"]
 
         # 2. 子アイデアの生成
+        use_semantic_scholar = generation % 2 == 0  # 2回に1回だけ使用
         new_ideas = mutate_ideas(
             base_dir=base_dir,
             client=client,
@@ -219,6 +220,7 @@ if __name__ == "__main__":
             workshop_description=workshop_description,
             ideas=parent_ideas,
             generation=generation,
+            use_semantic_scholar=use_semantic_scholar,
         )
 
         # 3. ベクトル化 & 登録

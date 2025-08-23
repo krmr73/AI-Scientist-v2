@@ -72,7 +72,6 @@ Here are the proposals that you have already generated:
 Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
 """
 
-# codeに関わる記述を変更
 idea_mutation_prompt = """{workshop_description}
 
 Here are the proposals that you have already generated:
@@ -84,7 +83,11 @@ Here are the proposals that you have already generated:
 Now, modify one or more key aspects of the existing idea to create a novel yet feasible variation. Your new idea should retain core elements while introducing meaningful changes in assumptions, parameters, or methodology. Ensure that it remains impactful and investigable using the provided code.
 Avoid trivial modifications or overly complex solutions that are impractical to implement.
 
-Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
+If you have new information from literature search results. incorporate them into your reflection and modify your proposal accordingly.
+
+Literature search results (if any):
+
+{semantic_scholar_results}
 """
 
 
@@ -160,6 +163,38 @@ def generate_simple_initial_idea(
     return ideas
 
 
+def generate_semantic_scholar_results(
+    prev_idea: Dict[str, Any],
+    client: Any,
+    model: str,
+    use_semantic_scholar: bool,
+):
+
+    if use_semantic_scholar:
+        search_query_prompt = f"""
+            You are preparing to do a literature review using Semantic Scholar for the following research idea.
+
+            Title: {prev_idea.get('Title', '')}
+            Hypothesis: {prev_idea.get('Short Hypothesis', '')}
+
+            Generate a concise search query (under 12 words) to find related papers.
+            Do not return commentary — only return the raw query string.
+            """
+        query, _ = get_response_from_llm(
+            prompt=search_query_prompt,
+            client=client,
+            model=model,
+            system_message="You are a helpful research assistant.",
+            msg_history=[],
+        )
+        query = query.strip().strip('"')
+        semantic_scholar_results = semantic_scholar_tool.use_tool(query=query)
+    else:
+        semantic_scholar_results = ""
+
+    return semantic_scholar_results
+
+
 def mutate_ideas(
     base_dir: str,
     client: Any,
@@ -167,6 +202,7 @@ def mutate_ideas(
     workshop_description: str,
     ideas: list,
     generation: int,
+    use_semantic_scholar: bool = False,
 ) -> List[Dict]:
 
     idea_str_archive = []
@@ -178,10 +214,18 @@ def mutate_ideas(
             prev_idea_string = json.dumps(prev_idea)
             msg_history = []
 
+            semantic_scholar_results = generate_semantic_scholar_results(
+                prev_idea=prev_idea,
+                client=client,
+                model=model,
+                use_semantic_scholar=use_semantic_scholar,
+            )
+
             # Use the initial idea generation prompt
             prompt_text = idea_mutation_prompt.format(
                 workshop_description=workshop_description,
                 prev_idea_string=prev_idea_string,
+                semantic_scholar_results=semantic_scholar_results,
             )
 
             response_text, msg_history = get_response_from_llm(
