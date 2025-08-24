@@ -8,7 +8,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
 # --- 定数 ---
-NAME = "qd"
+NAME = "qd_semantic_scholar"
 GROUP_NAMES = ["Reflection-only", "Literature-informed", "Proposed"]
 COLORS = ["steelblue", "darkorange", "forestgreen"]
 UMAP_OUTPUT_PATH = f"../results/{NAME}/umap_3groups.png"
@@ -192,6 +192,6 @@ for group_name, pairs in similar_ideas.items():
     print(f"{group_name} の類似ペア数: {len(pairs)}")
 
 
-df = pd.read_csv("../results/qd/qd_history.csv")
+df = pd.read_csv(f"../results/{NAME}/qd_history.csv")
 # エリート数の推移をプロット
-plot_elites_number(df, "../results/qd/elites_number_over_generations.png")
+plot_elites_number(df, f"../results/{NAME}/elites_number_over_generations.png")
