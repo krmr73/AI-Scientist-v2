@@ -24,6 +24,8 @@ import os
 import random
 import re
 import sys
+from collections import deque
+from itertools import product
 from typing import Dict, List, Tuple
 
 import dotenv
@@ -127,6 +129,7 @@ def update_elo(ra: float, rb: float, sa: float, K: float) -> Tuple[float, float]
 def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, temperature: float) -> Dict:
     rng = random.Random(seed)
 
+    # --- 初期化（アイテムEloは従来通り） ---
     items = []
     for g, lst in groups_data.items():
         for i, t in enumerate(lst):
@@ -135,16 +138,57 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
 
     group_names = sorted(groups_data.keys())
     group_pairs = [(a, b) for i, a in enumerate(group_names) for b in group_names[i + 1 :]]
+    P = len(group_pairs)
 
+    # --- 各グループペアの全ユニーク組合せデッキ（非復元）を用意 ---
+    pair_decks: Dict[Tuple[str, str], deque] = {}
+    total_capacity = 0
+    for ga, gb in group_pairs:
+        deck = [(ia, ib) for ia, ib in product(range(len(groups_data[ga])), range(len(groups_data[gb])))]
+        rng.shuffle(deck)  # seedに基づいて決定的にシャッフル
+        pair_decks[(ga, gb)] = deque(deck)
+        total_capacity += len(deck)
+
+    if matches > total_capacity:
+        raise ValueError(
+            f"要求された試合数 matches={matches} は、ユニークに生成可能な最大数 {total_capacity} を超えています。"
+        )
+
+    # --- グループペア一様サンプリングを厳密に維持する割当て ---
+    base = matches // P
+    rem = matches % P
+    # 余りremをランダムにrem個のペアへ+1（seedに依存）
+    pair_order = group_pairs[:]  # コピー
+    rng.shuffle(pair_order)
+    need_per_pair = {pair: base for pair in group_pairs}
+    for pair in pair_order[:rem]:
+        need_per_pair[pair] += 1
+
+    # --- 実行（各ペアから必要数だけ先頭を消化：ユニーク保証） ---
     log = []
+    m = 0
+    # ペアの出現順はシャッフルしつつ、必要数を1件ずつラウンドロビンで消化してもよいが、
+    # ここでは単純に必要数分を順に積む → その後全体をシャッフルしても良い。
+    scheduled_matches = []
+    for pair in group_pairs:
+        ga, gb = pair
+        need = need_per_pair[pair]
+        if need > len(pair_decks[pair]):
+            raise ValueError(
+                f"ペア {ga} vs {gb} に必要な試合数 {need} がデッキ残数 {len(pair_decks[pair])} を超えました。"
+            )
+        for _ in range(need):
+            ia, ib = pair_decks[pair].popleft()
+            scheduled_matches.append((ga, ia, gb, ib))
 
-    for m in tqdm(range(matches), desc="Judging matches"):
-        ga, gb = rng.choice(group_pairs)
-        ia = rng.randrange(len(groups_data[ga]))
-        ib = rng.randrange(len(groups_data[gb]))
+    # 全体の順序も乱択（seed依存、結果の再現性を保ちつつ偏りを避ける）
+    rng.shuffle(scheduled_matches)
+
+    for ga, ia, gb, ib in tqdm(scheduled_matches, desc="Judging matches"):
         a_key, b_key = (ga, ia), (gb, ib)
         a_text, b_text = groups_data[ga][ia], groups_data[gb][ib]
 
+        # 左右の表示順はランダム
         if rng.random() < 0.5:
             left_text, right_text = a_text, b_text
             invert = False
@@ -152,14 +196,16 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
             left_text, right_text = b_text, a_text
             invert = True
 
+        # 判定
         winner = judge_pair(left_text, right_text, temperature=temperature)
         if winner == "left":
             sa = 1.0 if not invert else 0.0
         elif winner == "right":
             sa = 0.0 if not invert else 1.0
         else:
-            sa = 0.5
+            sa = 0.5  # tieを使う場合
 
+        # Elo更新（従来通り）
         ra, rb = R[a_key], R[b_key]
         ra2, rb2 = update_elo(ra, rb, sa, K)
         R[a_key], R[b_key] = ra2, rb2
@@ -179,6 +225,7 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
                 "rb_after": rb2,
             }
         )
+        m += 1
 
     group_ratings = {g: sum(R[(g, i)] for i in range(len(lst))) / len(lst) for g, lst in groups_data.items()}
 
