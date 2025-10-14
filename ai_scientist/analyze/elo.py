@@ -108,6 +108,24 @@ def judge_pair(idea_left: str, idea_right: str, temperature: float = 0.0) -> str
     raise ValueError(f"Unexpected judge output: {content}")
 
 
+def norm_key(ga, ia, gb, ib):
+    # (A,i)-(B,j) と (B,j)-(A,i) を同一視
+    return (ga, ia, gb, ib) if (ga, ia, gb, ib) <= (gb, ib, ga, ia) else (gb, ib, ga, ia)
+
+
+def load_seen_pairs(paths):
+    """過去 matches.json（複数可）から既出ペア集合を作る"""
+    seen = set()
+    for p in paths:
+        with open(p, "r", encoding="utf-8") as f:
+            ms = json.load(f)
+        for m in ms:
+            ga, ia = m["group_a"], m["idx_a"]
+            gb, ib = m["group_b"], m["idx_b"]
+            seen.add(norm_key(ga, ia, gb, ib))
+    return seen
+
+
 # -------------------------- Elo --------------------------
 
 
@@ -126,10 +144,18 @@ def update_elo(ra: float, rb: float, sa: float, K: float) -> Tuple[float, float]
 # ----------------------- Main logic ----------------------
 
 
-def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, temperature: float) -> Dict:
+def run(
+    groups_data: Dict[str, List[str]],
+    matches: int,
+    K: float,
+    seed: int,
+    temperature: float,
+    seen_pairs: set | None = None,
+) -> Dict:
     rng = random.Random(seed)
+    seen_pairs = set() if seen_pairs is None else set(seen_pairs)
 
-    # --- 初期化（アイテムEloは従来通り） ---
+    # 初期化
     items = []
     for g, lst in groups_data.items():
         for i, t in enumerate(lst):
@@ -138,57 +164,42 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
 
     group_names = sorted(groups_data.keys())
     group_pairs = [(a, b) for i, a in enumerate(group_names) for b in group_names[i + 1 :]]
-    P = len(group_pairs)
 
-    # --- 各グループペアの全ユニーク組合せデッキ（非復元）を用意 ---
-    pair_decks: Dict[Tuple[str, str], deque] = {}
+    # 各グループペアのデッキを「未出カードだけ」で作る（非復元）
+    pair_decks = {}
     total_capacity = 0
     for ga, gb in group_pairs:
-        deck = [(ia, ib) for ia, ib in product(range(len(groups_data[ga])), range(len(groups_data[gb])))]
-        rng.shuffle(deck)  # seedに基づいて決定的にシャッフル
-        pair_decks[(ga, gb)] = deque(deck)
-        total_capacity += len(deck)
+        all_pairs = [(ia, ib) for ia, ib in product(range(len(groups_data[ga])), range(len(groups_data[gb])))]
+        remaining = [(ia, ib) for (ia, ib) in all_pairs if norm_key(ga, ia, gb, ib) not in seen_pairs]
+        rng.shuffle(remaining)  # seedに基づく決定的シャッフル
+        pair_decks[(ga, gb)] = deque(remaining)
+        total_capacity += len(remaining)
 
+    if total_capacity == 0:
+        raise RuntimeError("未出のカードが残っていません（全て既出）。")
     if matches > total_capacity:
-        raise ValueError(
-            f"要求された試合数 matches={matches} は、ユニークに生成可能な最大数 {total_capacity} を超えています。"
+        print(
+            f"[WARN] 要求matches={matches} > 未出容量={total_capacity}。"
+            f"生成できるのは最大 {total_capacity} 試合まで。"
         )
+        matches = total_capacity
 
-    # --- グループペア一様サンプリングを厳密に維持する割当て ---
-    base = matches // P
-    rem = matches % P
-    # 余りremをランダムにrem個のペアへ+1（seedに依存）
-    pair_order = group_pairs[:]  # コピー
-    rng.shuffle(pair_order)
-    need_per_pair = {pair: base for pair in group_pairs}
-    for pair in pair_order[:rem]:
-        need_per_pair[pair] += 1
+    # まだ残りのあるペアだけを対象に
+    active_pairs = [p for p in group_pairs if pair_decks[p]]
 
-    # --- 実行（各ペアから必要数だけ先頭を消化：ユニーク保証） ---
     log = []
-    m = 0
-    # ペアの出現順はシャッフルしつつ、必要数を1件ずつラウンドロビンで消化してもよいが、
-    # ここでは単純に必要数分を順に積む → その後全体をシャッフルしても良い。
-    scheduled_matches = []
-    for pair in group_pairs:
-        ga, gb = pair
-        need = need_per_pair[pair]
-        if need > len(pair_decks[pair]):
-            raise ValueError(
-                f"ペア {ga} vs {gb} に必要な試合数 {need} がデッキ残数 {len(pair_decks[pair])} を超えました。"
-            )
-        for _ in range(need):
-            ia, ib = pair_decks[pair].popleft()
-            scheduled_matches.append((ga, ia, gb, ib))
+    for m in tqdm(range(matches), desc="Judging matches"):
+        # グループペア自体の選択は従来通り一様（必要なら不確実なペアだけに事前で絞る）
+        ga, gb = rng.choice(active_pairs)
+        ia, ib = pair_decks[(ga, gb)].popleft()
 
-    # 全体の順序も乱択（seed依存、結果の再現性を保ちつつ偏りを避ける）
-    rng.shuffle(scheduled_matches)
+        # 念のため登録（次回以降の追加実験でも除外される）
+        seen_pairs.add(norm_key(ga, ia, gb, ib))
 
-    for ga, ia, gb, ib in tqdm(scheduled_matches, desc="Judging matches"):
         a_key, b_key = (ga, ia), (gb, ib)
         a_text, b_text = groups_data[ga][ia], groups_data[gb][ib]
 
-        # 左右の表示順はランダム
+        # 左右ランダム化
         if rng.random() < 0.5:
             left_text, right_text = a_text, b_text
             invert = False
@@ -196,16 +207,14 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
             left_text, right_text = b_text, a_text
             invert = True
 
-        # 判定
         winner = judge_pair(left_text, right_text, temperature=temperature)
         if winner == "left":
             sa = 1.0 if not invert else 0.0
         elif winner == "right":
             sa = 0.0 if not invert else 1.0
         else:
-            sa = 0.5  # tieを使う場合
+            sa = 0.5
 
-        # Elo更新（従来通り）
         ra, rb = R[a_key], R[b_key]
         ra2, rb2 = update_elo(ra, rb, sa, K)
         R[a_key], R[b_key] = ra2, rb2
@@ -225,10 +234,15 @@ def run(groups_data: Dict[str, List[str]], matches: int, K: float, seed: int, te
                 "rb_after": rb2,
             }
         )
-        m += 1
+
+        # デッキが空になったペアは母集団から外す
+        if not pair_decks[(ga, gb)]:
+            active_pairs = [p for p in active_pairs if pair_decks[p]]
+            if not active_pairs and m < matches - 1:
+                # 予定数に達する前に容量切れ
+                break
 
     group_ratings = {g: sum(R[(g, i)] for i in range(len(lst))) / len(lst) for g, lst in groups_data.items()}
-
     return {
         "item_ratings": {f"{g}:{i}": R[(g, i)] for g, lst in groups_data.items() for i in range(len(lst))},
         "group_ratings": group_ratings,
@@ -247,6 +261,13 @@ def main():
     ap.add_argument(
         "--workshop-file", type=str, default="", help="Path to a file containing the workshop description."
     )
+    ap.add_argument(
+        "--seen-matches",
+        type=str,
+        nargs="*",
+        default=[],
+        help="過去の *_matches.json を指定すると、そこに含まれるペアを除外して追加生成します。",
+    )
     args = ap.parse_args()
 
     global WORKSHOP_DESC
@@ -260,26 +281,37 @@ def main():
     existing_ideas = load_json("ideas/polya_urn_model.json")[:idea_num]
     existing_literature_ideas = load_json("ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
 
+    # groups = {
+    #     "Reflection-only": existing_ideas,
+    #     "Literature-informed": existing_literature_ideas,
+    #     "Proposed": proposed_ideas,
+    #     "Proposed-semantic": proposed_literature_ideas,
+    # }
+
+    # res = run(groups, matches=args.matches, K=args.K, seed=args.seed, temperature=args.temperature)
+
     groups = {
-        "Reflection-only": existing_ideas,
         "Literature-informed": existing_literature_ideas,
-        "Proposed": proposed_ideas,
+        # "Proposed": proposed_ideas,
         "Proposed-semantic": proposed_literature_ideas,
     }
 
-    res = run(groups, matches=args.matches, K=args.K, seed=args.seed, temperature=args.temperature)
+    seen_pairs = load_seen_pairs(args.seen_matches) if args.seen_matches else set()
+    res = run(
+        groups, matches=args.matches, K=args.K, seed=args.seed, temperature=args.temperature, seen_pairs=seen_pairs
+    )
 
     os.makedirs(os.path.dirname(args.out_prefix), exist_ok=True)
-    with open(f"{args.out_prefix}_group_ratings.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["group", "elo_mean"])
-        for g, r in sorted(res["group_ratings"].items(), key=lambda x: -x[1]):
-            w.writerow([g, f"{r:.2f}"])
-    with open(f"{args.out_prefix}_item_ratings.csv", "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(["group_idx", "elo"])
-        for k, r in sorted(res["item_ratings"].items(), key=lambda x: -x[1]):
-            w.writerow([k, f"{r:.2f}"])
+    # with open(f"{args.out_prefix}_group_ratings.csv", "w", newline="", encoding="utf-8") as f:
+    #     w = csv.writer(f)
+    #     w.writerow(["group", "elo_mean"])
+    #     for g, r in sorted(res["group_ratings"].items(), key=lambda x: -x[1]):
+    #         w.writerow([g, f"{r:.2f}"])
+    # with open(f"{args.out_prefix}_item_ratings.csv", "w", newline="", encoding="utf-8") as f:
+    #     w = csv.writer(f)
+    #     w.writerow(["group_idx", "elo"])
+    #     for k, r in sorted(res["item_ratings"].items(), key=lambda x: -x[1]):
+    #         w.writerow([k, f"{r:.2f}"])
     with open(f"{args.out_prefix}_matches.json", "w", encoding="utf-8") as f:
         json.dump(res["matches"], f, ensure_ascii=False, indent=2)
 
