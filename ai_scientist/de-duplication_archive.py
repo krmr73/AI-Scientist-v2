@@ -7,7 +7,6 @@ import numpy as np
 import pandas as pd
 from generate_ideas import mutate_ideas, pairwise_evaluate
 from sentence_transformers import SentenceTransformer
-from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.preprocessing import normalize
 
 from ai_scientist.llm import AVAILABLE_LLMS, create_client
