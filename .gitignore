@@ -194,3 +194,8 @@ final_papers/
 # HF
 cache/
 huggingface/
+
+images/
+elites/
+results_cycleqd/
+ideas/
