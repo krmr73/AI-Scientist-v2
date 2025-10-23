@@ -8,11 +8,11 @@ import matplotlib.pyplot as plt
 # ==============================
 # 入出力設定
 # ==============================
-INPUT_PATH = "results/combined_matches_latest.json"  # 例: .jsonl か、配列JSONなら "matches.json"
-OUT_RATINGS_JSON = "results/final_elo_by_idea.json"
-OUT_GROUP_JSON = "results/final_group_means.json"
-OUT_GROUP_STATS_JSON = "results/final_group_stats.json"  # 追加: CIつき
-OUT_DIR_FIG = Path("results/figs")
+INPUT_PATH = "../results/combined_matches_latest.json"  # 例: .jsonl か、配列JSONなら "matches.json"
+OUT_RATINGS_JSON = "../results/final_elo_by_idea.json"
+OUT_GROUP_JSON = "../results/final_group_means.json"
+OUT_GROUP_STATS_JSON = "../results/final_group_stats.json"  # 追加: CIつき
+OUT_DIR_FIG = Path("../results/figs")
 OUT_PNG_RANK = OUT_DIR_FIG / "melo_ranking.png"
 OUT_PNG_WINRATE = OUT_DIR_FIG / "pairwise_winrate.png"
 

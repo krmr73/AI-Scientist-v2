@@ -8,8 +8,8 @@ Minimal pairwise judging logger (group-level)
 - 出力: 単純な試合ログ JSON（*_matches.json）のみ
 
 Usage 例:
-  python elo.py \
-    --matches 1200 --seed 42 --out-prefix results/elo \
+  python pairwise_judge.py \
+    --matches 1200 --seed 42 --out-prefix results/pairwise_judge \
     --workshop-file workshop.md \
     --pair "Reflection-only:*" --pair "Reflection-only:Literature-informed"
 """
@@ -236,11 +236,9 @@ def run(
         if rng.random() < 0.5:
             left_group, left_idx, left_text = ga, ia, a_text
             right_group, right_idx, right_text = gb, ib, b_text
-            invert = False
         else:
             left_group, left_idx, left_text = gb, ib, b_text
             right_group, right_idx, right_text = ga, ia, a_text
-            invert = True
 
         winner = judge_pair(left_text, right_text, temperature=temperature)
 
@@ -304,11 +302,11 @@ def main():
 
     # --- あなたのプロジェクトのデータ読み込み（既存のまま） ---
     idea_num = 80
-    proposed_ideas = load_json("../results/qd/elites/gen_50.json")[:idea_num]
-    proposed_literature_ideas = load_json("../results/qd_semantic_scholar/elites/gen_50.json")[:idea_num]
+    proposed_ideas = load_json("../../results/qd/elites/gen_50.json")[:idea_num]
+    proposed_literature_ideas = load_json("../../results/qd_semantic_scholar/elites/gen_50.json")[:idea_num]
 
-    existing_ideas = load_json("ideas/polya_urn_model.json")[:idea_num]
-    existing_literature_ideas = load_json("ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
+    existing_ideas = load_json("../ideas/polya_urn_model.json")[:idea_num]
+    existing_literature_ideas = load_json("../ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
 
     # 使いたいグループをここで選ぶ
     groups = {
