@@ -65,11 +65,6 @@ agent:
     temp: 0.5
     max_tokens: 8192
 
-  vlm_feedback:
-    model: gpt-4o-2024-11-20
-    temp: 0.5
-    max_tokens: null
-
   search:
     max_debug_depth: 3
     debug_prob: 0.5
