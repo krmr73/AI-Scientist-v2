@@ -1,24 +1,22 @@
 """
-Minimal Elo ranking for LLM pairwise judging (group-level)
-- Input: multiple JSON files, each with {"group": "A", "ideas": ["..."]}
-- Sampling: uniformly over group pairs, then randomly pick an idea from each group
-- Judge: LLM-as-a-judge returns winner in {left,right,tie}
-- Output: item-level Elo, group average Elo, simple CSV logs
+Minimal pairwise judging logger (group-level)
+- Elo 計算は行わず、試合結果のみを保存
+- 入力: 既存コードと同じ（プロジェクト内の JSON 群）
+- サンプリング: グループペアを指定可能（A:* / *:B / A:B を複数可）。
+  未出ペアを均等に選び、その中からアイデア同士を非復元でサンプリング
+- Judge: LLM-as-a-judge が {left,right} を返す（tie は使わない想定だが後方互換で left/right/tie を許容）
+- 出力: 単純な試合ログ JSON（*_matches.json）のみ
 
-Usage:
+Usage 例:
   python elo.py \
-    --groups A.json B.json C.json D.json \
-    --matches 1200 --K 16 --seed 42 --out-prefix results/elo \
-    --workshop-file workshop.md
-
-Notes:
-- This version uses the external LLM client wrapper (create_client, get_response_from_llm) with model fixed to gpt-4o-2024-05-13.
+    --matches 1200 --seed 42 --out-prefix results/elo \
+    --workshop-file workshop.md \
+    --pair "Reflection-only:*" --pair "Reflection-only:Literature-informed"
 """
 
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import os
 import random
@@ -36,11 +34,9 @@ parent_parent_dir = os.path.abspath(os.path.join(parent_dir, ".."))
 sys.path.append(parent_parent_dir)
 sys.path.append(parent_dir)
 
-
 from llm import create_client, get_response_from_llm
 
 dotenv.load_dotenv()
-
 
 # -------------------------- I/O --------------------------
 
@@ -51,8 +47,11 @@ def load_json(path):
 
 
 # ---------------------- LLM-as-judge ---------------------
-# User-provided prompt style (expert workshop reviewer)
-pairwise_evaluation_system_prompt = "You are an expert reviewer for an academic workshop. Your role is to evaluate and compare research ideas submitted to the workshop. You must provide an impartial and expert judgment based on the criteria of novelty, feasibility, and relevance to the workshop theme."
+pairwise_evaluation_system_prompt = (
+    "You are an expert reviewer for an academic workshop. Your role is to evaluate and "
+    "compare research ideas submitted to the workshop. You must provide an impartial and "
+    "expert judgment based on the criteria of novelty, feasibility, and relevance to the workshop theme."
+)
 
 WORKSHOP_DESC = """"""
 
@@ -80,9 +79,7 @@ client, model = create_client("gpt-4o-2024-05-13")
 
 
 def judge_pair(idea_left: str, idea_right: str, temperature: float = 0.0) -> str:
-    """Use the workshop-style prompt. Map 'A is better'/'B is better' to left/right.
-    We randomize A/B outside this fn via caller; here A=left, B=right as given.
-    """
+    """ワークショップスタイルのプロンプト。'A is better'/'B is better' を left/right にマップ。"""
     user_prompt = PAIRWISE_USER_TMPL.format(
         workshop_description=WORKSHOP_DESC or "",
         idea_a=idea_left,
@@ -96,16 +93,16 @@ def judge_pair(idea_left: str, idea_right: str, temperature: float = 0.0) -> str
         temperature=temperature,
     )
     txt = (content or "").strip().lower()
-    if "a is better" in txt:
+    if "a is better" in txt or re.fullmatch(r"a", txt):
         return "left"
-    if "b is better" in txt:
+    if "b is better" in txt or re.fullmatch(r"b", txt):
         return "right"
-    # fallback: try to detect lone 'a' or 'b'
-    if re.fullmatch(r"a", txt):
-        return "left"
-    if re.fullmatch(r"b", txt):
-        return "right"
+    if "tie" in txt:
+        return "tie"
     raise ValueError(f"Unexpected judge output: {content}")
+
+
+# -------------------- 既出ペアの扱い ---------------------
 
 
 def norm_key(ga, ia, gb, ib):
@@ -126,19 +123,58 @@ def load_seen_pairs(paths):
     return seen
 
 
-# -------------------------- Elo --------------------------
+# ------------------ グループペアのフィルタ ------------------
 
 
-def expected_score(ra: float, rb: float) -> float:
-    return 1.0 / (1.0 + 10 ** ((rb - ra) / 400.0))
+def build_group_pairs(all_groups: List[str], pair_filters: List[str]) -> List[Tuple[str, str]]:
+    """
+    pair_filters の例:
+      - "A:*"  -> A vs それ以外すべて
+      - "*:B"  -> 全て vs B
+      - "A:B"  -> A vs B だけ
+    複数指定可。重複は除去。順序は (min, max) の無向扱い。
+    指定が無い場合は全組合せ（A<B）。
+    """
+    gset = set(all_groups)
+    pairs = set()
 
+    def add_pair(x, y):
+        if x == y:
+            return
+        a, b = (x, y) if x < y else (y, x)
+        if a in gset and b in gset:
+            pairs.add((a, b))
 
-def update_elo(ra: float, rb: float, sa: float, K: float) -> Tuple[float, float]:
-    ea = expected_score(ra, rb)
-    eb = 1.0 - ea
-    ra2 = ra + K * (sa - ea)
-    rb2 = rb + K * ((1.0 - sa) - eb)
-    return ra2, rb2
+    if not pair_filters:
+        # デフォルト：全組
+        for i, a in enumerate(all_groups):
+            for b in all_groups[i + 1 :]:
+                add_pair(a, b)
+        return sorted(pairs)
+
+    for f in pair_filters:
+        f = f.strip()
+        if ":" not in f:
+            # 単独名は無視（安全側）
+            continue
+        left, right = f.split(":", 1)
+        left = left.strip()
+        right = right.strip()
+        if left == "*" and right == "*":
+            # 全組
+            for i, a in enumerate(all_groups):
+                for b in all_groups[i + 1 :]:
+                    add_pair(a, b)
+        elif left == "*" and right != "*":
+            for a in all_groups:
+                add_pair(a, right)
+        elif left != "*" and right == "*":
+            for b in all_groups:
+                add_pair(left, b)
+        else:
+            add_pair(left, right)
+
+    return sorted(pairs)
 
 
 # ----------------------- Main logic ----------------------
@@ -147,23 +183,23 @@ def update_elo(ra: float, rb: float, sa: float, K: float) -> Tuple[float, float]
 def run(
     groups_data: Dict[str, List[str]],
     matches: int,
-    K: float,
     seed: int,
     temperature: float,
     seen_pairs: set | None = None,
+    group_pair_filters: List[str] | None = None,
 ) -> Dict:
     rng = random.Random(seed)
     seen_pairs = set() if seen_pairs is None else set(seen_pairs)
 
-    # 初期化
+    # アイテム一覧
     items = []
     for g, lst in groups_data.items():
         for i, t in enumerate(lst):
             items.append((g, i, t))
-    R = {(g, i): 1000.0 for (g, i, _) in items}
 
     group_names = sorted(groups_data.keys())
-    group_pairs = [(a, b) for i, a in enumerate(group_names) for b in group_names[i + 1 :]]
+    # フィルタでペア集合を決定
+    group_pairs = build_group_pairs(group_names, group_pair_filters or [])
 
     # 各グループペアのデッキを「未出カードだけ」で作る（非復元）
     pair_decks = {}
@@ -176,7 +212,7 @@ def run(
         total_capacity += len(remaining)
 
     if total_capacity == 0:
-        raise RuntimeError("未出のカードが残っていません（全て既出）。")
+        raise RuntimeError("未出のカードが残っていません（全て既出、またはフィルタが厳しすぎます）。")
     if matches > total_capacity:
         print(
             f"[WARN] 要求matches={matches} > 未出容量={total_capacity}。"
@@ -184,77 +220,61 @@ def run(
         )
         matches = total_capacity
 
-    # まだ残りのあるペアだけを対象に
     active_pairs = [p for p in group_pairs if pair_decks[p]]
 
     log = []
     for m in tqdm(range(matches), desc="Judging matches"):
-        # グループペア自体の選択は従来通り一様（必要なら不確実なペアだけに事前で絞る）
         ga, gb = rng.choice(active_pairs)
         ia, ib = pair_decks[(ga, gb)].popleft()
 
-        # 念のため登録（次回以降の追加実験でも除外される）
+        # 既出登録
         seen_pairs.add(norm_key(ga, ia, gb, ib))
 
-        a_key, b_key = (ga, ia), (gb, ib)
         a_text, b_text = groups_data[ga][ia], groups_data[gb][ib]
 
         # 左右ランダム化
         if rng.random() < 0.5:
-            left_text, right_text = a_text, b_text
+            left_group, left_idx, left_text = ga, ia, a_text
+            right_group, right_idx, right_text = gb, ib, b_text
             invert = False
         else:
-            left_text, right_text = b_text, a_text
+            left_group, left_idx, left_text = gb, ib, b_text
+            right_group, right_idx, right_text = ga, ia, a_text
             invert = True
 
         winner = judge_pair(left_text, right_text, temperature=temperature)
-        if winner == "left":
-            sa = 1.0 if not invert else 0.0
-        elif winner == "right":
-            sa = 0.0 if not invert else 1.0
-        else:
-            sa = 0.5
 
-        ra, rb = R[a_key], R[b_key]
-        ra2, rb2 = update_elo(ra, rb, sa, K)
-        R[a_key], R[b_key] = ra2, rb2
+        # ログのみ（Elo は更新しない）
+        match_rec = {
+            "match": m,
+            "group_a": ga,
+            "idx_a": ia,
+            "group_b": gb,
+            "idx_b": ib,
+            "left_group": left_group,
+            "left_idx": left_idx,
+            "right_group": right_group,
+            "right_idx": right_idx,
+            "winner_raw": winner,  # 'left' / 'right' / 'tie'
+            "winner_group": (left_group if winner == "left" else right_group if winner == "right" else "tie"),
+        }
+        log.append(match_rec)
 
-        log.append(
-            {
-                "match": m,
-                "group_a": ga,
-                "idx_a": ia,
-                "group_b": gb,
-                "idx_b": ib,
-                "winner_raw": winner,
-                "sa_effective": sa,
-                "ra_before": ra,
-                "rb_before": rb,
-                "ra_after": ra2,
-                "rb_after": rb2,
-            }
-        )
-
-        # デッキが空になったペアは母集団から外す
+        # デッキが空になったら除外
         if not pair_decks[(ga, gb)]:
             active_pairs = [p for p in active_pairs if pair_decks[p]]
             if not active_pairs and m < matches - 1:
-                # 予定数に達する前に容量切れ
                 break
 
-    group_ratings = {g: sum(R[(g, i)] for i in range(len(lst))) / len(lst) for g, lst in groups_data.items()}
-    return {
-        "item_ratings": {f"{g}:{i}": R[(g, i)] for g, lst in groups_data.items() for i in range(len(lst))},
-        "group_ratings": group_ratings,
-        "matches": log,
-    }
+    return {"matches": log}
 
 
 # -------------------------- CLI --------------------------
+
+
 def main():
-    ap = argparse.ArgumentParser(description="Minimal Elo ranking with LLM-as-judge (using gpt-4o-2024-05-13)")
+    ap = argparse.ArgumentParser(description="Pairwise judging logger (no Elo)")
     ap.add_argument("--matches", type=int, default=1200)
-    ap.add_argument("--K", type=float, default=16.0)
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--out-prefix", type=str, default="results/elo")
@@ -268,12 +288,21 @@ def main():
         default=[],
         help="過去の *_matches.json を指定すると、そこに含まれるペアを除外して追加生成します。",
     )
+    ap.add_argument(
+        "--pair",
+        type=str,
+        action="append",
+        default=[],
+        help='対戦させるグループペアを指定（複数可）。例: "Reflection-only:*", "Reflection-only:Proposed", "*:Literature-informed"',
+    )
     args = ap.parse_args()
 
     global WORKSHOP_DESC
-    with open(args.workshop_file, "r") as f:
-        WORKSHOP_DESC = f.read()
+    if args.workshop_file:
+        with open(args.workshop_file, "r", encoding="utf-8") as f:
+            WORKSHOP_DESC = f.read()
 
+    # --- あなたのプロジェクトのデータ読み込み（既存のまま） ---
     idea_num = 80
     proposed_ideas = load_json("../results/qd/elites/gen_50.json")[:idea_num]
     proposed_literature_ideas = load_json("../results/qd_semantic_scholar/elites/gen_50.json")[:idea_num]
@@ -281,43 +310,30 @@ def main():
     existing_ideas = load_json("ideas/polya_urn_model.json")[:idea_num]
     existing_literature_ideas = load_json("ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
 
-    # groups = {
-    #     "Reflection-only": existing_ideas,
-    #     "Literature-informed": existing_literature_ideas,
-    #     "Proposed": proposed_ideas,
-    #     "Proposed-semantic": proposed_literature_ideas,
-    # }
-
-    # res = run(groups, matches=args.matches, K=args.K, seed=args.seed, temperature=args.temperature)
-
+    # 使いたいグループをここで選ぶ
     groups = {
+        "Reflection-only": existing_ideas,
         "Literature-informed": existing_literature_ideas,
-        # "Proposed": proposed_ideas,
+        "Proposed": proposed_ideas,
         "Proposed-semantic": proposed_literature_ideas,
     }
 
     seen_pairs = load_seen_pairs(args.seen_matches) if args.seen_matches else set()
+
     res = run(
-        groups, matches=args.matches, K=args.K, seed=args.seed, temperature=args.temperature, seen_pairs=seen_pairs
+        groups_data=groups,
+        matches=args.matches,
+        seed=args.seed,
+        temperature=args.temperature,
+        seen_pairs=seen_pairs,
+        group_pair_filters=args.pair,  # ← ここでペア指定を反映
     )
 
     os.makedirs(os.path.dirname(args.out_prefix), exist_ok=True)
-    # with open(f"{args.out_prefix}_group_ratings.csv", "w", newline="", encoding="utf-8") as f:
-    #     w = csv.writer(f)
-    #     w.writerow(["group", "elo_mean"])
-    #     for g, r in sorted(res["group_ratings"].items(), key=lambda x: -x[1]):
-    #         w.writerow([g, f"{r:.2f}"])
-    # with open(f"{args.out_prefix}_item_ratings.csv", "w", newline="", encoding="utf-8") as f:
-    #     w = csv.writer(f)
-    #     w.writerow(["group_idx", "elo"])
-    #     for k, r in sorted(res["item_ratings"].items(), key=lambda x: -x[1]):
-    #         w.writerow([k, f"{r:.2f}"])
     with open(f"{args.out_prefix}_matches.json", "w", encoding="utf-8") as f:
         json.dump(res["matches"], f, ensure_ascii=False, indent=2)
 
-    print("Group Elo (mean):")
-    for g, r in sorted(res["group_ratings"].items(), key=lambda x: -x[1]):
-        print(f"  {g}: {r:.1f}")
+    print(f"Saved matches to {args.out_prefix}_matches.json")
 
 
 if __name__ == "__main__":
