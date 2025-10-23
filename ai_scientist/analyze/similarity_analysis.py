@@ -11,7 +11,7 @@ from sklearn.preprocessing import normalize
 NAME = "qd_semantic_scholar"
 GROUP_NAMES = ["Reflection-only", "Literature-informed", "Proposed", "Proposed (literature)"]
 COLORS = ["steelblue", "darkorange", "forestgreen", "mediumpurple"]
-UMAP_OUTPUT_PATH = f"../results/{NAME}/umap_3groups.png"
+UMAP_OUTPUT_PATH = f"../results/{NAME}/umap.png"
 DISTRIBUTION_OUTPUT_PATH = f"../results/{NAME}/distribution.png"
 HEATMAP_PATHS = [
     f"../results/{NAME}/heatmap_baseline.png",
