@@ -180,7 +180,7 @@ if __name__ == "__main__":
 
     base_dir = args.workshop_file.replace(".md", "")
 
-    output_dir = "results/qd"
+    output_dir = "results/qd_semantic_scholar"
     os.makedirs(f"{output_dir}/images", exist_ok=True)
     os.makedirs(f"{output_dir}/elites", exist_ok=True)
 

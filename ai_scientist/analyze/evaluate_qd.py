@@ -9,8 +9,8 @@ from sklearn.preprocessing import normalize
 
 # --- 定数 ---
 NAME = "qd_semantic_scholar"
-GROUP_NAMES = ["Reflection-only", "Literature-informed", "Proposed"]
-COLORS = ["steelblue", "darkorange", "forestgreen"]
+GROUP_NAMES = ["Reflection-only", "Literature-informed", "Proposed", "Proposed (literature)"]
+COLORS = ["steelblue", "darkorange", "forestgreen", "mediumpurple"]
 UMAP_OUTPUT_PATH = f"../results/{NAME}/umap_3groups.png"
 DISTRIBUTION_OUTPUT_PATH = f"../results/{NAME}/distribution.png"
 HEATMAP_PATHS = [
@@ -68,28 +68,29 @@ def plot_umap(reduced, labels):
     plt.savefig(UMAP_OUTPUT_PATH)  # 変数名はそのままでもOK（ファイル名を変えるならここも修正）
 
 
-def plot_similarity_histograms(s0, s1, s2):
-    all_sims = np.concatenate([s0, s1, s2])
+def plot_similarity_histograms(s0, s1, s2, s3):
+    all_sims = np.concatenate([s0, s1, s2, s3])
     bins = np.histogram_bin_edges(all_sims, bins=15)
-    ymax = max(np.histogram(s, bins=bins)[0].max() for s in [s0, s1, s2])
+    ymax = max(np.histogram(s, bins=bins)[0].max() for s in [s0, s1, s2, s3])
 
-    fig, axes = plt.subplots(3, 1, figsize=(8, 10), sharex=True)
-    for ax, sim, name, color in zip(axes, [s0, s1, s2], GROUP_NAMES, COLORS):
+    fig, axes = plt.subplots(4, 1, figsize=(8, 10), sharex=True)
+    for ax, sim, name, color in zip(axes, [s0, s1, s2, s3], GROUP_NAMES, COLORS):
         ax.hist(sim, bins=bins, color=color, alpha=0.7, edgecolor="grey")
         ax.set_title(name)
         ax.set_ylabel("Density")
         ax.set_ylim(0, ymax)
-    axes[2].set_xlabel("Cosine Similarity Between Ideas")
+    axes[3].set_xlabel("Cosine Similarity Between Ideas")
 
     plt.tight_layout()
     plt.savefig(DISTRIBUTION_OUTPUT_PATH)
 
 
-def plot_elites_number(df, output_path):
+def plot_elites_number(df, df_literature, output_path):
 
     # グラフの作成
     plt.figure(figsize=(10, 6))
     plt.plot(df["generation"], df["num_elites"], label="Number of Elites")
+    plt.plot(df_literature["generation"], df_literature["num_elites"], label="Number of Elites (Literature)")
     plt.plot(df["generation"], df["total_ideas"], label="Total Ideas")
     plt.xlabel("Generation")
     plt.ylabel("Count")
@@ -133,7 +134,8 @@ idea_num = 80
 plt.rcParams.update({"font.size": 16})
 
 # 1. データ読み込み
-proposed_ideas = load_json(f"../results/{NAME}/elites/gen_50.json")[:idea_num]
+proposed_ideas = load_json(f"../results/qd/elites/gen_50.json")[:idea_num]
+proposed_literature_ideas = load_json(f"../results/{NAME}/elites/gen_50.json")[:idea_num]
 
 existing_ideas = load_json("ideas/polya_urn_model.json")[:idea_num]
 existing_literature_ideas = load_json("ideas/polya_urn_model_with_semanticscholar.json")[: len(proposed_ideas)]
@@ -159,6 +161,12 @@ for idea in proposed_ideas:
         texts.append(text)
         labels.append(2)
 
+for idea in proposed_literature_ideas:
+    text = preprocess_idea_text(idea)
+    if text.strip():
+        texts.append(text)
+        labels.append(3)
+
 # 3. 埋め込み
 model = SentenceTransformer("all-MiniLM-L6-v2")
 embeddings = model.encode(texts)
@@ -173,7 +181,7 @@ embeddings = np.array(embeddings)
 
 # plot_umap(reduced, labels)
 # 5. グループ分割・類似度計算
-emb_groups = [embeddings[labels == i] for i in range(3)]
+emb_groups = [embeddings[labels == i] for i in range(4)]
 means_stds = [compute_mean_std_within_group(g) for g in emb_groups]
 
 print("✅ Group-wise Mean Pairwise Similarities:")
@@ -192,6 +200,7 @@ for group_name, pairs in similar_ideas.items():
     print(f"{group_name} の類似ペア数: {len(pairs)}")
 
 
-df = pd.read_csv(f"../results/{NAME}/qd_history.csv")
+df = pd.read_csv(f"../results/qd/qd_history.csv")
+df_literature = pd.read_csv(f"../results/{NAME}/qd_history.csv")
 # エリート数の推移をプロット
-plot_elites_number(df, f"../results/{NAME}/elites_number_over_generations.png")
+plot_elites_number(df, df_literature, f"../results/{NAME}/elites_number_over_generations.png")
