@@ -1,10 +1,9 @@
-from functools import wraps
-from typing import Dict, Optional, List
-import tiktoken
-from collections import defaultdict
 import asyncio
-from datetime import datetime
 import logging
+from collections import defaultdict
+from datetime import datetime
+from functools import wraps
+from typing import Dict, List, Optional
 
 
 class TokenTracker:
@@ -17,9 +16,7 @@ class TokenTracker:
         We assume we get these from the LLM response, and we don't count
         the tokens by ourselves.
         """
-        self.token_counts = defaultdict(
-            lambda: {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
-        )
+        self.token_counts = defaultdict(lambda: {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0})
         self.interactions = defaultdict(list)
 
         self.MODEL_PRICES = {
@@ -98,9 +95,7 @@ class TokenTracker:
 
     def reset(self):
         """Reset all token counts and interactions."""
-        self.token_counts = defaultdict(
-            lambda: {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0}
-        )
+        self.token_counts = defaultdict(lambda: {"prompt": 0, "completion": 0, "reasoning": 0, "cached": 0})
         self.interactions = defaultdict(list)
         # self._encoders = {}
 
@@ -146,9 +141,7 @@ def track_token_usage(func):
         prompt = kwargs.get("prompt")
         system_message = kwargs.get("system_message")
         if not prompt and not system_message:
-            raise ValueError(
-                "Either 'prompt' or 'system_message' must be provided for token tracking"
-            )
+            raise ValueError("Either 'prompt' or 'system_message' must be provided for token tracking")
 
         logging.info("args: ", args)
         logging.info("kwargs: ", kwargs)
@@ -174,9 +167,7 @@ def track_token_usage(func):
                 model,
                 system_message,
                 prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
+                result.choices[0].message.content,  # Assumes response is in content field
                 timestamp,
             )
         return result
@@ -186,9 +177,7 @@ def track_token_usage(func):
         prompt = kwargs.get("prompt")
         system_message = kwargs.get("system_message")
         if not prompt and not system_message:
-            raise ValueError(
-                "Either 'prompt' or 'system_message' must be provided for token tracking"
-            )
+            raise ValueError("Either 'prompt' or 'system_message' must be provided for token tracking")
         result = func(*args, **kwargs)
         model = result.model
         timestamp = result.created
@@ -212,9 +201,7 @@ def track_token_usage(func):
                 model,
                 system_message,
                 prompt,
-                result.choices[
-                    0
-                ].message.content,  # Assumes response is in content field
+                result.choices[0].message.content,  # Assumes response is in content field
                 timestamp,
             )
         return result

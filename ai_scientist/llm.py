@@ -6,8 +6,9 @@ from typing import Any
 import anthropic
 import backoff
 import openai
-from ai_scientist.utils.token_tracker import track_token_usage
 from dotenv import load_dotenv
+
+from ai_scientist.utils.token_tracker import track_token_usage
 
 load_dotenv()
 

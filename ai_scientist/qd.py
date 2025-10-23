@@ -1,7 +1,7 @@
 import argparse
 import json
 import os
-from typing import Dict, List, Tuple
+from typing import Dict, List
 
 import pandas as pd
 from sklearn.decomposition import PCA
