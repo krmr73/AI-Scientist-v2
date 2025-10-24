@@ -2,13 +2,18 @@ import argparse
 import json
 import os
 import os.path as osp
-import re
 import sys
 import traceback
 from typing import Any, Dict, List
 
 sys.path.append(osp.join(osp.dirname(__file__), ".."))
-from ai_scientist.llm import AVAILABLE_LLMS, create_client, get_response_from_llm
+from ai_scientist.llm import (
+    AVAILABLE_LLMS,
+    create_client,
+    extract_json_block,
+    get_idea_from_payload,
+    get_response_from_llm,
+)
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 
 # Create tool instances
@@ -115,7 +120,7 @@ def generate_simple_initial_idea(
         print(f"Generating proposal {idx + 1}/{max_num_generations}")
         try:
             prev_ideas_string = "\n\n".join(idea_str_archive)
-            msg_history = []
+            msg_history: List[Dict[str, str]] = []
 
             # Use the initial idea generation prompt
             prompt_text = idea_generation_simple_prompt.format(
@@ -131,12 +136,10 @@ def generate_simple_initial_idea(
                 msg_history=msg_history,
             )
 
-            arguments_text = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL).group(1)
-
             # Parse arguments
             try:
-                arguments_json = json.loads(arguments_text)
-                idea = arguments_json.get("idea")
+                payload = extract_json_block(response_text)  # 例: {"idea": {...}}
+                idea = get_idea_from_payload(payload)  # "idea" の存在チェック込み
 
                 idea["ID"] = f"0_{idx}"
 
@@ -236,12 +239,10 @@ def mutate_ideas(
                 msg_history=msg_history,
             )
 
-            arguments_text = re.search(r"```json\s*(.*?)\s*```", response_text, re.DOTALL).group(1)
-
             # Parse arguments
             try:
-                arguments_json = json.loads(arguments_text)
-                idea = arguments_json.get("idea")
+                payload = extract_json_block(response_text)  # 例: {"idea": {...}}
+                idea = get_idea_from_payload(payload)  # "idea" の存在チェック込み
                 if not idea:
                     raise ValueError("Missing 'idea' in arguments.")
 
@@ -363,8 +364,7 @@ def evaluate_idea(idea: Dict[str, Any], client: Any, model: str) -> Dict[str, in
             prompt=eval_prompt, client=client, model=model, system_message=evaluation_system_prompt, msg_history=[]
         )
 
-        match = re.search(r"```json\s*(.*?)\s*```", response, re.DOTALL)
-        score_json = json.loads(match.group(1)) if match else json.loads(response)
+        score_json = extract_json_block(response)
 
         return {
             "Interestingness": int(score_json.get("Interestingness", 0)),

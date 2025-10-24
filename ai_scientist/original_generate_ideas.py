@@ -1,13 +1,19 @@
 import argparse
 import json
 import os.path as osp
-import re
 import sys
 import traceback
 from typing import Any, Dict, List
 
 sys.path.append(osp.join(osp.dirname(__file__), ".."))
-from ai_scientist.llm import AVAILABLE_LLMS, create_client, get_response_from_llm
+from ai_scientist.llm import (
+    AVAILABLE_LLMS,
+    create_client,
+    get_idea_from_payload,
+    get_response_from_llm,
+    parse_action_and_arguments,
+    parse_json_text,
+)
 from ai_scientist.tools.base_tool import BaseTool
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 
@@ -151,7 +157,7 @@ def generate_temp_free_idea(
 
             last_tool_results = ""
             idea_finalized = False
-            msg_history = []
+            msg_history: List[Dict[str, str]] = []
 
             for reflection_round in range(num_reflections):
                 if reflection_round == 0:
@@ -179,23 +185,10 @@ def generate_temp_free_idea(
                 # Parse the LLM's response
                 try:
                     # Use regular expressions to extract the components
-                    action_pattern = r"ACTION:\s*(.*?)\s*ARGUMENTS:"
-                    arguments_pattern = r"ARGUMENTS:\s*(.*?)(?:$|\nTHOUGHT:|\n$)"
+                    action, arguments_text = parse_action_and_arguments(response_text)
 
-                    action_match = re.search(action_pattern, response_text, re.DOTALL | re.IGNORECASE)
-                    arguments_match = re.search(arguments_pattern, response_text, re.DOTALL | re.IGNORECASE)
-
-                    if not all([action_match, arguments_match]):
-                        raise ValueError("Failed to parse the LLM response.")
-
-                    action = action_match.group(1).strip()
-                    arguments_text = arguments_match.group(1).strip()
                     print(f"Action: {action}")
                     print(f"Arguments: {arguments_text}")
-
-                    # If arguments are wrapped in ```json blocks, extract the content
-                    if arguments_text.startswith("```json"):
-                        arguments_text = re.search(r"```json\s*(.*?)\s*```", arguments_text, re.DOTALL).group(1)
 
                     # Process the action and arguments
                     if action in tools_dict:
@@ -203,7 +196,7 @@ def generate_temp_free_idea(
                         tool = tools_dict[action]
                         # Parse arguments
                         try:
-                            arguments_json = json.loads(arguments_text)
+                            arguments_json = parse_json_text(arguments_text)
                         except json.JSONDecodeError:
                             raise ValueError(f"Invalid arguments JSON for {action}.")
 
@@ -217,8 +210,8 @@ def generate_temp_free_idea(
                     elif action == "FinalizeIdea":
                         # Parse arguments
                         try:
-                            arguments_json = json.loads(arguments_text)
-                            idea = arguments_json.get("idea")
+                            arguments_json = parse_json_text(arguments_text)
+                            idea = get_idea_from_payload(arguments_json)
                             if not idea:
                                 raise ValueError("Missing 'idea' in arguments.")
 
@@ -232,7 +225,7 @@ def generate_temp_free_idea(
                     else:
                         print("Invalid action. Please specify one of the available tools.")
                         print(f"Available actions are: {tool_names_str}")
-                except Exception as e:
+                except Exception:
                     print(f"Failed to parse LLM response. Response text:\n{response_text}")
                     traceback.print_exc()
                     break  # Exit the loop if parsing fails
@@ -240,7 +233,7 @@ def generate_temp_free_idea(
             if idea_finalized:
                 continue  # Move to the next idea
 
-        except Exception as e:
+        except Exception:
             print("Failed to generate proposal:")
             traceback.print_exc()
             continue
