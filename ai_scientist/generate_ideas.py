@@ -14,6 +14,14 @@ from ai_scientist.llm import (
     get_idea_from_payload,
     get_response_from_llm,
 )
+from ai_scientist.prompts import (
+    PROMPT_IDEA_GENERATION,
+    PROMPT_IDEA_MUTATION,
+    PROMPT_LITSEARCH_QUERY,
+    PROMPT_REVIEW_PAIRWISE,
+    SYSTEM_PROMPT_BASE,
+    SYSTEM_PROMPT_REVIEWER_PAIRWISE,
+)
 from ai_scientist.tools.semantic_scholar import SemanticScholarSearchTool
 
 # Create tool instances
@@ -36,64 +44,6 @@ The IDEA JSON should include the following fields:
 - "Risk Factors and Limitations": A list of potential risks and limitations of the proposal.""",
     },
 ]
-
-
-system_prompt = f"""You are an experienced AI researcher who aims to propose high-impact research ideas resembling exciting grant proposals. Feel free to propose any novel ideas or experiments; make sure they are novel. Be very creative and think out of the box. Each proposal should stem from a simple and elegant question, observation, or hypothesis about the topic. For example, they could involve very interesting and simple interventions or investigations that explore new possibilities or challenge existing assumptions.
-
-Ensure that the proposal does not require resources beyond what an academic lab could afford. These proposals should lead to papers that are publishable at conferences.
-
-Respond in the following format:
-
-Provide the IDEA JSON in the arguments:
-
-IDEA JSON:
-```json
-{{
-  "idea": {{
-    "Name": "...",
-    "Title": "...",
-    "Short Hypothesis": "...",
-    "Related Work": "...",
-    "Abstract": "...",
-    "Experiments": "...",
-    "Risk Factors and Limitations": "..."
-  }}
-}}
-```
-
-Ensure the JSON is properly formatted for automatic parsing.
-
-Note: You should perform at least one literature search before finalizing your idea to ensure it is well-informed by existing research."""
-
-# Define the initial idea generation prompt
-idea_generation_simple_prompt = """{workshop_description}
-
-Here are the proposals that you have already generated:
-
-'''
-{prev_ideas_string}
-'''
-
-Begin by generating an interestingly new high-level research proposal that differs from what you have previously proposed.
-"""
-
-idea_mutation_prompt = """{workshop_description}
-
-Here are the proposals that you have already generated:
-
-'''
-{prev_idea_string}
-'''
-
-Now, modify one or more key aspects of the existing idea to create a novel yet feasible variation. Your new idea should retain core elements while introducing meaningful changes in assumptions, parameters, or methodology. Ensure that it remains impactful and investigable using the provided code.
-Avoid trivial modifications or overly complex solutions that are impractical to implement.
-
-If you have new information from literature search results. incorporate them into your reflection and modify your proposal accordingly.
-
-Literature search results (if any):
-
-{semantic_scholar_results}
-"""
 
 
 def generate_simple_initial_idea(
@@ -123,7 +73,7 @@ def generate_simple_initial_idea(
             msg_history: List[Dict[str, str]] = []
 
             # Use the initial idea generation prompt
-            prompt_text = idea_generation_simple_prompt.format(
+            prompt_text = PROMPT_IDEA_GENERATION.format(
                 workshop_description=workshop_description,
                 prev_ideas_string=prev_ideas_string,
             )
@@ -132,7 +82,7 @@ def generate_simple_initial_idea(
                 prompt=prompt_text,
                 client=client,
                 model=model,
-                system_message=system_prompt,
+                system_message=SYSTEM_PROMPT_BASE,
                 msg_history=msg_history,
             )
 
@@ -174,15 +124,10 @@ def generate_semantic_scholar_results(
 ):
 
     if use_semantic_scholar:
-        search_query_prompt = f"""
-            You are preparing to do a literature review using Semantic Scholar for the following research idea.
-
-            Title: {prev_idea.get('Title', '')}
-            Hypothesis: {prev_idea.get('Short Hypothesis', '')}
-
-            Generate a concise search query (under 12 words) to find related papers.
-            Do not return commentary — only return the raw query string.
-            """
+        search_query_prompt = PROMPT_LITSEARCH_QUERY.format(
+            title=prev_idea.get("Title", ""),
+            hypothesis=prev_idea.get("Short Hypothesis", ""),
+        )
         query, _ = get_response_from_llm(
             prompt=search_query_prompt,
             client=client,
@@ -215,7 +160,7 @@ def mutate_ideas(
         print(f"Generating proposal {i}/{len(ideas)}")
         try:
             prev_idea_string = json.dumps(prev_idea)
-            msg_history = []
+            msg_history: List[Dict[str, str]] = []
 
             semantic_scholar_results = generate_semantic_scholar_results(
                 prev_idea=prev_idea,
@@ -225,7 +170,7 @@ def mutate_ideas(
             )
 
             # Use the initial idea generation prompt
-            prompt_text = idea_mutation_prompt.format(
+            prompt_text = PROMPT_IDEA_MUTATION.format(
                 workshop_description=workshop_description,
                 prev_idea_string=prev_idea_string,
                 semantic_scholar_results=semantic_scholar_results,
@@ -235,7 +180,7 @@ def mutate_ideas(
                 prompt=prompt_text,
                 client=client,
                 model=model,
-                system_message=system_prompt,
+                system_message=SYSTEM_PROMPT_BASE,
                 msg_history=msg_history,
             )
 
@@ -279,36 +224,19 @@ def pairwise_evaluate(
     model: str,
     workshop_description: str,
 ):
-    pairwise_evaluation_system_prompt = """
-        You are an expert reviewer for an academic workshop. Your role is to evaluate and compare research ideas submitted to the workshop. You must provide an impartial and expert judgment based on the criteria of novelty, feasibility, and relevance to the workshop theme.
-    """
 
-    pairwise_evaluate_prompt = f"""
-        Workshop Description:
-        {workshop_description}
-
-        Here are two research ideas:
-
-        [Idea A]
-        {idea_a}
-
-        [Idea B]
-        {idea_b}
-
-        Which idea is better overall based on the workshop's theme and the following criteria:
-        1. Novelty
-        2. Feasibility
-        3. Significance
-
-        Please respond with only: "A is better" or "B is better".
-        """.strip()
+    pairwise_evaluate_prompt = PROMPT_REVIEW_PAIRWISE.format(
+        workshop_description=workshop_description,
+        idea_a=json.dumps(idea_a, ensure_ascii=False),
+        idea_b=json.dumps(idea_b, ensure_ascii=False),
+    )
 
     try:
         response, _ = get_response_from_llm(
             prompt=pairwise_evaluate_prompt,
             client=client,
             model=model,
-            system_message=pairwise_evaluation_system_prompt,
+            system_message=SYSTEM_PROMPT_REVIEWER_PAIRWISE,
             msg_history=[],
         )
         response_text = response.strip().lower()
@@ -326,59 +254,7 @@ def pairwise_evaluate(
         return None
 
 
-def evaluate_idea(idea: Dict[str, Any], client: Any, model: str) -> Dict[str, int]:
-    """
-    1つのアイデアに対して LLM にスコア付けをさせる。
-    - client: LLMクライアント
-    - model: モデル名（例: gpt-4o）
-    戻り値は 3軸のスコア辞書
-    """
-    # 評価用の system prompt（役割指定）
-    evaluation_system_prompt = (
-        "You are a critical and objective reviewer for academic research proposals. "
-        "Your task is to assign integer scores from 1 (very poor) to 20 (excellent) on the following dimensions:\n"
-        "- Interestingness: Is the idea intellectually stimulating or surprising?\n"
-        "- Novelty: Is it clearly original and different from prior work?\n"
-        "- Feasibility: Can it be realistically implemented and tested in an academic lab?\n\n"
-        "Return only a JSON block, without commentary or extra explanation."
-    )
-
-    # ユーザープロンプト（入力となるアイデア）
-    eval_prompt = f"""
-        Evaluate the following research proposal:
-
-        {json.dumps(idea, indent=2)}
-
-        Return your scores in this format:
-
-        ```json
-        {{
-        "Interestingness": <int>,
-        "Novelty": <int>,
-        "Feasibility": <int>
-        }}
-        """.strip()
-
-    try:
-        response, _ = get_response_from_llm(
-            prompt=eval_prompt, client=client, model=model, system_message=evaluation_system_prompt, msg_history=[]
-        )
-
-        score_json = extract_json_block(response)
-
-        return {
-            "Interestingness": int(score_json.get("Interestingness", 0)),
-            "Novelty": int(score_json.get("Novelty", 0)),
-            "Feasibility": int(score_json.get("Feasibility", 0)),
-        }
-
-    except Exception as e:
-        print("評価失敗:", e)
-        return {"Interestingness": 0, "Novelty": 0, "Feasibility": 0}
-
-
 if __name__ == "__main__":
-    CRITERIAS = ["Feasibility", "Interestingness", "Novelty"]
 
     parser = argparse.ArgumentParser(description="Generate AI scientist proposals - template free")
     parser.add_argument(
