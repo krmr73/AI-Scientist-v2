@@ -6,8 +6,9 @@ from typing import Any
 import anthropic
 import backoff
 import openai
-from ai_scientist.utils.token_tracker import track_token_usage
 from dotenv import load_dotenv
+
+from ai_scientist.utils.token_tracker import track_token_usage
 
 load_dotenv()
 
@@ -470,3 +471,85 @@ def create_client(model) -> tuple[Any, str]:
         )
     else:
         raise ValueError(f"Model {model} not supported.")
+
+
+class JsonParseError(RuntimeError):
+    pass
+
+
+# ```json ... ``` 抽出用
+_JSON_BLOCK_RE = re.compile(r"```json\s*(.*?)\s*```", re.DOTALL | re.IGNORECASE)
+# ACTION/ARGUMENTS 抽出用（ファイル2互換）
+_ACTION_RE = re.compile(r"ACTION:\s*(.*?)\s*ARGUMENTS:", re.DOTALL | re.IGNORECASE)
+_ARGUMENTS_RE = re.compile(r"ARGUMENTS:\s*(.*)$", re.DOTALL | re.IGNORECASE)
+
+
+def extract_json_block(text: str) -> dict:
+    """
+    LLM応答から ```json ... ``` を優先的に取り出し、無ければ全文をJSONとして解釈。
+    """
+    m = _JSON_BLOCK_RE.search(text)
+    raw = m.group(1).strip() if m else text.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise JsonParseError(f"Failed to parse JSON: {e}\n-- Raw --\n{raw[:500]}")
+
+
+def parse_action_and_arguments(text: str) -> tuple[str, str]:
+    """
+    'ACTION: ...' 'ARGUMENTS: ...' 形式を解析して (action, args_text) を返す。
+    """
+    am = _ACTION_RE.search(text)
+    gm = _ARGUMENTS_RE.search(text)
+    if not (am and gm):
+        raise JsonParseError("Failed to parse ACTION/ARGUMENTS block.")
+    return am.group(1).strip(), gm.group(1).strip()
+
+
+def parse_json_text(args_text: str) -> dict:
+    """
+    引数テキストが ```json ... ``` の場合にも、そのままJSONの場合にも対応して辞書化。
+    """
+    m = _JSON_BLOCK_RE.search(args_text)
+    raw = m.group(1).strip() if m else args_text.strip()
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError as e:
+        raise JsonParseError(f"Invalid JSON arguments: {e}\n-- Raw --\n{raw[:500]}")
+
+
+def get_idea_from_payload(payload: dict) -> dict:
+    """
+    {"idea": {...}} から idea を取り出し、最低限の存在チェックのみ行う（最小変更方針）。
+    """
+    idea = payload.get("idea")
+    if not isinstance(idea, dict):
+        raise JsonParseError("Missing 'idea' object in payload.")
+    return idea
+
+
+# 既存のフォールバック関数との整合: 互換のため残しつつ、新ロジックを利用
+def extract_json_between_markers(llm_output: str) -> dict | None:
+    """
+    互換API: 旧実装を新しい extract_json_block ベースに置き換え。
+    - うまくいかない場合のみ簡易フォールバックを使う。
+    """
+    try:
+        return extract_json_block(llm_output)
+    except JsonParseError:
+        # 旧フォールバック: JSONライク部分を雑に拾う（最後の保険）
+        json_pattern = r"\{.*?\}"
+        matches = re.findall(json_pattern, llm_output, re.DOTALL)
+        for json_string in matches:
+            s = json_string.strip()
+            try:
+                return json.loads(s)
+            except json.JSONDecodeError:
+                # さらに制御文字除去して再挑戦
+                try:
+                    s2 = re.sub(r"[\x00-\x1F\x7F]", "", s)
+                    return json.loads(s2)
+                except json.JSONDecodeError:
+                    continue
+        return None

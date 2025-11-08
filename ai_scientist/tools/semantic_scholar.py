@@ -1,10 +1,10 @@
 import os
-import requests
 import time
 import warnings
 from typing import Dict, List, Optional, Union
 
 import backoff
+import requests
 
 from ai_scientist.tools.base_tool import BaseTool
 
@@ -21,8 +21,7 @@ class SemanticScholarSearchTool(BaseTool):
         self,
         name: str = "SearchSemanticScholar",
         description: str = (
-            "Search for relevant literature using Semantic Scholar. "
-            "Provide a search query to find relevant papers."
+            "Search for relevant literature using Semantic Scholar. " "Provide a search query to find relevant papers."
         ),
         max_results: int = 10,
     ):
@@ -57,11 +56,11 @@ class SemanticScholarSearchTool(BaseTool):
     def search_for_papers(self, query: str) -> Optional[List[Dict]]:
         if not query:
             return None
-        
+
         headers = {}
         if self.S2_API_KEY:
             headers["X-API-KEY"] = self.S2_API_KEY
-        
+
         rsp = requests.get(
             "https://api.semanticscholar.org/graph/v1/paper/search",
             headers=headers,
@@ -87,9 +86,7 @@ class SemanticScholarSearchTool(BaseTool):
     def format_papers(self, papers: List[Dict]) -> str:
         paper_strings = []
         for i, paper in enumerate(papers):
-            authors = ", ".join(
-                [author.get("name", "Unknown") for author in paper.get("authors", [])]
-            )
+            authors = ", ".join([author.get("name", "Unknown") for author in paper.get("authors", [])])
             paper_strings.append(
                 f"""{i + 1}: {paper.get("title", "Unknown Title")}. {authors}. {paper.get("venue", "Unknown Venue")}, {paper.get("year", "Unknown Year")}.
 Number of citations: {paper.get("citationCount", "N/A")}
@@ -98,22 +95,18 @@ Abstract: {paper.get("abstract", "No abstract available.")}"""
         return "\n\n".join(paper_strings)
 
 
-@backoff.on_exception(
-    backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff
-)
+@backoff.on_exception(backoff.expo, requests.exceptions.HTTPError, on_backoff=on_backoff)
 def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
     S2_API_KEY = os.getenv("S2_API_KEY")
     headers = {}
     if not S2_API_KEY:
-        warnings.warn(
-            "No Semantic Scholar API key found. Requests will be subject to stricter rate limits."
-        )
+        warnings.warn("No Semantic Scholar API key found. Requests will be subject to stricter rate limits.")
     else:
         headers["X-API-KEY"] = S2_API_KEY
-    
+
     if not query:
         return None
-    
+
     rsp = requests.get(
         "https://api.semanticscholar.org/graph/v1/paper/search",
         headers=headers,
@@ -124,9 +117,7 @@ def search_for_papers(query, result_limit=10) -> Union[None, List[Dict]]:
         },
     )
     print(f"Response Status Code: {rsp.status_code}")
-    print(
-        f"Response Content: {rsp.text[:500]}"
-    )  # Print the first 500 characters of the response content
+    print(f"Response Content: {rsp.text[:500]}")  # Print the first 500 characters of the response content
     rsp.raise_for_status()
     results = rsp.json()
     total = results["total"]
